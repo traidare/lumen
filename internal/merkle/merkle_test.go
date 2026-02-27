@@ -118,7 +118,7 @@ func TestBuildTree_OnlyGoFiles(t *testing.T) {
 
 func TestBuildTree_ParallelMatchesSerial(t *testing.T) {
 	dir := t.TempDir()
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		content := fmt.Sprintf("package main\n\nfunc F%d() {}\n", i)
 		path := filepath.Join(dir, fmt.Sprintf("f%d.go", i))
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {

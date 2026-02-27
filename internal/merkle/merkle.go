@@ -83,19 +83,14 @@ func BuildTree(rootDir string, skip SkipFunc) (*Tree, error) {
 	close(work)
 
 	results := make(chan result, len(relPaths))
-	workers := merkleWorkers
-	if workers > len(relPaths) {
-		workers = len(relPaths)
-	}
+	workers := min(merkleWorkers, len(relPaths))
 	if workers == 0 {
 		workers = 1
 	}
 
 	var wg sync.WaitGroup
 	for range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for rel := range work {
 				data, err := os.ReadFile(filepath.Join(rootDir, rel))
 				if err != nil {
@@ -105,7 +100,7 @@ func BuildTree(rootDir string, skip SkipFunc) (*Tree, error) {
 				hash := fmt.Sprintf("%x", sha256.Sum256(data))
 				results <- result{rel: rel, hash: hash}
 			}
-		}()
+		})
 	}
 
 	go func() {
