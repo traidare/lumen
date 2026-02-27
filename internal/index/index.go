@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/foobar/agent-index-go/internal/chunker"
@@ -29,7 +30,6 @@ type StatusInfo struct {
 	TotalFiles     int
 	IndexedFiles   int
 	TotalChunks    int
-	StaleFiles     int
 	LastIndexedAt  string
 	EmbeddingModel string
 }
@@ -220,6 +220,9 @@ func (idx *Indexer) indexWithTree(ctx context.Context, projectDir string, force 
 	if err := idx.store.SetMeta("last_indexed_at", time.Now().UTC().Format(time.RFC3339)); err != nil {
 		return stats, fmt.Errorf("set last_indexed_at: %w", err)
 	}
+	if err := idx.store.SetMeta("total_files", strconv.Itoa(stats.TotalFiles)); err != nil {
+		return stats, fmt.Errorf("set total_files: %w", err)
+	}
 
 	return stats, nil
 }
@@ -230,11 +233,11 @@ func (idx *Indexer) Search(ctx context.Context, projectDir string, queryVec []fl
 }
 
 // Status returns information about the current index state for a project.
+// All values are read from the database; no filesystem walk is performed.
 func (idx *Indexer) Status(projectDir string) (StatusInfo, error) {
 	var info StatusInfo
 	info.ProjectPath = projectDir
 
-	// Get store statistics.
 	storeStats, err := idx.store.Stats()
 	if err != nil {
 		return info, fmt.Errorf("get store stats: %w", err)
@@ -242,29 +245,15 @@ func (idx *Indexer) Status(projectDir string) (StatusInfo, error) {
 	info.IndexedFiles = storeStats.TotalFiles
 	info.TotalChunks = storeStats.TotalChunks
 
-	// Get metadata.
-	meta, err := idx.store.GetMetaBatch([]string{"embedding_model", "last_indexed_at"})
+	meta, err := idx.store.GetMetaBatch([]string{"embedding_model", "last_indexed_at", "total_files"})
 	if err != nil {
 		return info, fmt.Errorf("get meta batch: %w", err)
 	}
 	info.EmbeddingModel = meta["embedding_model"]
 	info.LastIndexedAt = meta["last_indexed_at"]
-
-	// Build current tree to get total files and detect stale files.
-	curTree, err := merkle.BuildTree(projectDir, nil)
-	if err != nil {
-		return info, fmt.Errorf("build merkle tree: %w", err)
+	if n, err := strconv.Atoi(meta["total_files"]); err == nil {
+		info.TotalFiles = n
 	}
-	info.TotalFiles = len(curTree.Files)
-
-	// Diff to find stale files.
-	oldHashes, err := idx.store.GetFileHashes()
-	if err != nil {
-		return info, fmt.Errorf("get file hashes: %w", err)
-	}
-	oldTree := &merkle.Tree{Files: oldHashes}
-	added, removed, modified := merkle.Diff(oldTree, curTree)
-	info.StaleFiles = len(added) + len(removed) + len(modified)
 
 	return info, nil
 }

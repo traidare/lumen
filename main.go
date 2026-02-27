@@ -1,3 +1,4 @@
+// Package main implements the agent-index MCP server for semantic code search.
 package main
 
 import (
@@ -53,7 +54,6 @@ type IndexStatusOutput struct {
 	TotalFiles     int    `json:"total_files"`
 	IndexedFiles   int    `json:"indexed_files"`
 	TotalChunks    int    `json:"total_chunks"`
-	StaleFiles     int    `json:"stale_files"`
 	LastIndexedAt  string `json:"last_indexed_at"`
 	EmbeddingModel string `json:"embedding_model"`
 }
@@ -108,7 +108,7 @@ func (ic *indexerCache) getOrCreate(projectPath string) (*index.Indexer, error) 
 }
 
 // handleSemanticSearch is the tool handler for the semantic_search tool.
-func (ic *indexerCache) handleSemanticSearch(ctx context.Context, req *mcp.CallToolRequest, input SemanticSearchInput) (*mcp.CallToolResult, SemanticSearchOutput, error) {
+func (ic *indexerCache) handleSemanticSearch(ctx context.Context, _ *mcp.CallToolRequest, input SemanticSearchInput) (*mcp.CallToolResult, SemanticSearchOutput, error) {
 	var out SemanticSearchOutput
 
 	if input.Path == "" {
@@ -177,7 +177,7 @@ func (ic *indexerCache) handleSemanticSearch(ctx context.Context, req *mcp.CallT
 }
 
 // handleIndexStatus is the tool handler for the index_status tool.
-func (ic *indexerCache) handleIndexStatus(ctx context.Context, req *mcp.CallToolRequest, input IndexStatusInput) (*mcp.CallToolResult, IndexStatusOutput, error) {
+func (ic *indexerCache) handleIndexStatus(_ context.Context, _ *mcp.CallToolRequest, input IndexStatusInput) (*mcp.CallToolResult, IndexStatusOutput, error) {
 	var out IndexStatusOutput
 
 	if input.Path == "" {
@@ -198,7 +198,6 @@ func (ic *indexerCache) handleIndexStatus(ctx context.Context, req *mcp.CallTool
 	out.TotalFiles = info.TotalFiles
 	out.IndexedFiles = info.IndexedFiles
 	out.TotalChunks = info.TotalChunks
-	out.StaleFiles = info.StaleFiles
 	out.LastIndexedAt = info.LastIndexedAt
 	out.EmbeddingModel = info.EmbeddingModel
 
@@ -261,7 +260,7 @@ func main() {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "index_status",
-		Description: "Check the indexing status of a project. Shows total files, indexed chunks, stale files, and embedding model.",
+		Description: "Check the indexing status of a project. Shows total files, indexed chunks, and embedding model.",
 	}, indexers.handleIndexStatus)
 
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {

@@ -201,6 +201,9 @@ func Hello() {}
 	if status.EmbeddingModel != "test-model" {
 		t.Fatalf("expected model=test-model, got %s", status.EmbeddingModel)
 	}
+	if status.TotalFiles != 1 {
+		t.Fatalf("expected total_files=1, got %d", status.TotalFiles)
+	}
 }
 
 func TestIndexer_StreamingBatchesProduceSameChunks(t *testing.T) {
