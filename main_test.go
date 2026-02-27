@@ -12,13 +12,11 @@ func TestIndexerCache_ConcurrentReads(t *testing.T) {
 	const goroutines = 20
 	var wg sync.WaitGroup
 	for range goroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			// Path doesn't exist on disk — getOrCreate will error, that's fine.
 			// We're testing there's no data race on the cache map/mutex.
 			ic.getOrCreate("/nonexistent/path/for/race/test")
-		}()
+		})
 	}
 	wg.Wait()
 }
