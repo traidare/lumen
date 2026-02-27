@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	_ "github.com/mattn/go-sqlite3"
@@ -58,13 +59,13 @@ func New(dsn string, dimensions int) (*Store, error) {
 	}
 	for _, p := range pragmas {
 		if _, err := db.Exec(p); err != nil {
-			db.Close()
+			_ = db.Close()
 			return nil, fmt.Errorf("exec %q: %w", p, err)
 		}
 	}
 
 	if err := createSchema(db, dimensions); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("create schema: %w", err)
 	}
 
@@ -125,6 +126,39 @@ func (s *Store) GetMeta(key string) (string, error) {
 	return val, nil
 }
 
+// GetMetaBatch retrieves multiple key-value pairs from project_meta in one query.
+// Missing keys are absent from the returned map.
+func (s *Store) GetMetaBatch(keys []string) (map[string]string, error) {
+	if len(keys) == 0 {
+		return map[string]string{}, nil
+	}
+	placeholders := make([]string, len(keys))
+	args := make([]any, len(keys))
+	for i, k := range keys {
+		placeholders[i] = "?"
+		args[i] = k
+	}
+	query := fmt.Sprintf(
+		"SELECT key, value FROM project_meta WHERE key IN (%s)",
+		strings.Join(placeholders, ","),
+	)
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query meta batch: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]string, len(keys))
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, fmt.Errorf("scan meta: %w", err)
+		}
+		result[k] = v
+	}
+	return result, rows.Err()
+}
+
 // UpsertFile inserts or updates a file path and its content hash.
 func (s *Store) UpsertFile(path, hash string) error {
 	_, err := s.db.Exec(
@@ -146,7 +180,7 @@ func (s *Store) InsertChunks(chunks []chunker.Chunk, vectors [][]float32) error 
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	chunkStmt, err := tx.Prepare(
 		`INSERT OR REPLACE INTO chunks (id, file_path, symbol, kind, start_line, end_line)
@@ -155,7 +189,7 @@ func (s *Store) InsertChunks(chunks []chunker.Chunk, vectors [][]float32) error 
 	if err != nil {
 		return fmt.Errorf("prepare chunk insert: %w", err)
 	}
-	defer chunkStmt.Close()
+	defer func() { _ = chunkStmt.Close() }()
 
 	vecStmt, err := tx.Prepare(
 		`INSERT OR REPLACE INTO vec_chunks (id, embedding) VALUES (?, ?)`,
@@ -163,7 +197,7 @@ func (s *Store) InsertChunks(chunks []chunker.Chunk, vectors [][]float32) error 
 	if err != nil {
 		return fmt.Errorf("prepare vec insert: %w", err)
 	}
-	defer vecStmt.Close()
+	defer func() { _ = vecStmt.Close() }()
 
 	for i, c := range chunks {
 		if _, err := chunkStmt.Exec(c.ID, c.FilePath, c.Symbol, c.Kind, c.StartLine, c.EndLine); err != nil {
@@ -188,7 +222,7 @@ func (s *Store) DeleteFileChunks(filePath string) error {
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Delete vec_chunks entries for chunks belonging to this file.
 	_, err = tx.Exec(
@@ -259,7 +293,7 @@ func (s *Store) Search(queryVec []float32, limit int, kindFilter string) ([]Sear
 	if err != nil {
 		return nil, fmt.Errorf("search query: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var results []SearchResult
 	for rows.Next() {
@@ -282,7 +316,7 @@ func (s *Store) GetFileHashes() (map[string]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("query files: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	hashes := make(map[string]string)
 	for rows.Next() {
@@ -295,14 +329,14 @@ func (s *Store) GetFileHashes() (map[string]string, error) {
 	return hashes, rows.Err()
 }
 
-// Stats returns aggregate statistics about the store contents.
+// Stats returns aggregate statistics about the store contents in one query.
 func (s *Store) Stats() (StoreStats, error) {
 	var stats StoreStats
-	if err := s.db.QueryRow("SELECT count(*) FROM files").Scan(&stats.TotalFiles); err != nil {
-		return stats, fmt.Errorf("count files: %w", err)
-	}
-	if err := s.db.QueryRow("SELECT count(*) FROM chunks").Scan(&stats.TotalChunks); err != nil {
-		return stats, fmt.Errorf("count chunks: %w", err)
+	err := s.db.QueryRow(
+		`SELECT (SELECT count(*) FROM files), (SELECT count(*) FROM chunks)`,
+	).Scan(&stats.TotalFiles, &stats.TotalChunks)
+	if err != nil {
+		return stats, fmt.Errorf("stats query: %w", err)
 	}
 	return stats, nil
 }

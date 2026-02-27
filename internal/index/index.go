@@ -246,8 +246,12 @@ func (idx *Indexer) Status(projectDir string) (StatusInfo, error) {
 	info.TotalChunks = storeStats.TotalChunks
 
 	// Get metadata.
-	info.EmbeddingModel, _ = idx.store.GetMeta("embedding_model")
-	info.LastIndexedAt, _ = idx.store.GetMeta("last_indexed_at")
+	meta, err := idx.store.GetMetaBatch([]string{"embedding_model", "last_indexed_at"})
+	if err != nil {
+		return info, fmt.Errorf("get meta batch: %w", err)
+	}
+	info.EmbeddingModel = meta["embedding_model"]
+	info.LastIndexedAt = meta["last_indexed_at"]
 
 	// Build current tree to get total files and detect stale files.
 	curTree, err := merkle.BuildTree(projectDir, nil)
