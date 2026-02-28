@@ -1,10 +1,10 @@
-# CLAUDE.md — agent-index-go
+# CLAUDE.md — agent-index
 
 ## Vision
 
 **Give AI coding agents precise, local semantic code search.**
 
-AI agents waste context window tokens reading entire files when they only need one function. `agent-index-go` fixes this: it parses a Go codebase into semantic chunks (functions, methods, types, interfaces, consts), embeds them via a local Ollama model, stores vectors in SQLite, and exposes search over MCP. The agent describes what it needs in natural language and gets back exact file paths and line ranges.
+AI agents waste context window tokens reading entire files when they only need one function. `agent-index` fixes this: it parses a Go codebase into semantic chunks (functions, methods, types, interfaces, consts), embeds them via a local Ollama model, stores vectors in SQLite, and exposes search over MCP. The agent describes what it needs in natural language and gets back exact file paths and line ranges.
 
 Everything runs locally — no API keys, no cloud, no code leaves the machine.
 
@@ -30,12 +30,39 @@ Everything runs locally — no API keys, no cloud, no code leaves the machine.
 
 | Package | Responsibility |
 |---|---|
-| `main.go` | MCP server, two tools: `semantic_search` and `index_status` |
+| `main.go` | 3-line entrypoint calling `cmd.Execute()` |
+| `cmd/` | Cobra CLI: `root.go`, `stdio.go` (MCP server), `index.go` (CLI indexing), `search.go` (CLI search) |
+| `internal/config` | Shared config: `Config` struct, `Load()`, env helpers, `DBPathForProject` |
 | `internal/index` | Orchestration: Merkle diffing, embedding batching, metadata |
 | `internal/store` | SQLite storage, sqlite-vec KNN search, cosine distance |
 | `internal/chunker` | Go AST parsing → `Chunk` structs (function/method/type/etc.) |
 | `internal/embedder` | Ollama HTTP client for generating embeddings |
 | `internal/merkle` | SHA-256 Merkle tree for incremental change detection, .gitignore support |
+
+## CLI
+
+Three subcommands:
+
+| Command | Description |
+|---|---|
+| `agent-index stdio` | Start MCP server on stdin/stdout (existing behavior) |
+| `agent-index index <path>` | Index a project from the CLI with progress output |
+| `agent-index search <query> <path>` | Search an indexed project from the CLI |
+
+### `agent-index index` flags
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--model` | `-m` | env or `ordis/jina-embeddings-v2-base-code` | Embedding model |
+| `--force` | `-f` | false | Force full re-index |
+
+### `agent-index search` flags
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--model` | `-m` | env or `ordis/jina-embeddings-v2-base-code` | Embedding model (must match indexed model) |
+| `--limit` | `-l` | 50 | Max results to return |
+| `--min-score` | `-s` | 0.5 | Minimum score threshold (-1 to 1). Results below this are excluded; use -1 to return all results. |
 
 ## MCP Tools
 
@@ -45,12 +72,13 @@ Everything runs locally — no API keys, no cloud, no code leaves the machine.
 |---|---|---|---|---|
 | `query` | string | yes | — | Natural language query |
 | `path` | string | yes | — | Absolute path to project root |
-| `limit` | integer | no | 10 | Max results |
+| `limit` | integer | no | 50 | Max results |
+| `min_score` | float | no | 0.5 | Minimum score threshold (-1 to 1). Results below this are excluded. Default 0.5. Use -1 to return all results. |
 | `force_reindex` | boolean | no | false | Forces full re-index |
 
-Returns: `SearchResultItem[]` with `file_path`, `symbol`, `kind`, `start_line`, `end_line`, `score`.
+Returns plaintext with code snippets. Each result has `file:lines`, symbol name, kind, score, and the actual source code.
 
-**Score:** `1.0 - cosine_distance`. Ordered descending (highest similarity first).
+**Score:** `1.0 - cosine_distance`. Range is [-1, 1] (negative = dissimilar). Ordered descending. Default `min_score` is 0.5. Use `min_score=-1` to bypass the threshold and return all results.
 
 ### `index_status`
 
@@ -64,17 +92,28 @@ Returns: `total_files`, `total_chunks`, `last_indexed_at` (RFC3339).
 
 | Variable | Default | Description |
 |---|---|---|
-| `AGENT_INDEX_EMBED_MODEL` | `qwen3-embedding:8b` | Ollama embedding model |
-| `AGENT_INDEX_EMBED_DIMS` | model-dependent | Override embedding dimensions |
+| `AGENT_INDEX_EMBED_MODEL` | `ordis/jina-embeddings-v2-base-code` | Ollama embedding model (must be in known models registry) |
+| `AGENT_INDEX_MAX_CHUNK_TOKENS` | `2048` | Max estimated tokens per chunk before splitting |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL |
 
 Switching models creates a separate index automatically — the DB path is SHA-256(projectPath + modelName).
+
+### Known models
+
+Dimensions and context length are looked up automatically from `internal/embedder/models.go`:
+
+| Model | Dims | Context | Size |
+|---|---|---|---|
+| `ordis/jina-embeddings-v2-base-code` | 768 | 8192 | ~323MB |
+| `nomic-embed-text` | 768 | 8192 | ~274MB |
+| `qwen3-embedding:8b` | 4096 | 32768 | ~4.7GB |
+| `all-minilm` | 384 | 512 | ~33MB |
 
 ## Key Implementation Details
 
 ### Chunk kinds
 
-`package`, `function`, `method`, `type`, `interface`, `const`, `var` — imports are explicitly skipped.
+`function`, `method`, `type`, `interface`, `const`, `var` — imports and package declarations are skipped (package chunks pollute search results).
 
 ### File filtering
 
@@ -103,9 +142,13 @@ Three layers, applied in order during tree walks:
 sha256(projectPath + modelName) → ~/.local/share/agent-index/<hash>/index.db
 ```
 
+### Chunk splitting
+
+Oversized chunks (estimated tokens > `AGENT_INDEX_MAX_CHUNK_TOKENS`) are split at line boundaries before embedding. Token count is estimated as `len(content) / 4`. Sub-chunks get `[1/N]` symbol suffixes and adjusted line ranges. No overlap between sub-chunks. A single line exceeding the limit passes through unsplit.
+
 ### Embedding batching
 
-Chunks are batched 32 at a time before sending to Ollama.
+Chunks are batched 32 at a time before sending to Ollama. Context length (`num_ctx`) is set automatically from the model registry.
 
 ### IndexerCache
 
@@ -139,7 +182,7 @@ One `*index.Indexer` per project path; lazy init with shared embedder. Lives for
 ## Build
 
 ```bash
-CGO_ENABLED=1 go build -o agent-index-go .
+CGO_ENABLED=1 go build -o agent-index .
 ```
 
 `CGO_ENABLED=1` is required — sqlite-vec compiles from C source.
@@ -148,6 +191,7 @@ CGO_ENABLED=1 go build -o agent-index-go .
 
 | Dep | Purpose |
 |---|---|
+| `github.com/spf13/cobra` | CLI framework (subcommands) |
 | `github.com/modelcontextprotocol/go-sdk` | MCP server/client |
 | `github.com/asg017/sqlite-vec-go-bindings` | sqlite-vec CGo bindings |
 | `github.com/mattn/go-sqlite3` | SQLite CGo driver |
