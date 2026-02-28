@@ -1,3 +1,17 @@
+// Copyright 2026 Aeneas Rekkas
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //go:build e2e
 
 package main
@@ -10,12 +24,46 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/aeneasr/agent-index/internal/config"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// Local copies of tool I/O types for black-box E2E testing.
+// These mirror cmd.SemanticSearchInput etc. but are intentionally
+// decoupled so the E2E tests don't depend on cmd internals.
+
+type semanticSearchOutput struct {
+	Results      []searchResultItem `json:"results"`
+	Reindexed    bool               `json:"reindexed"`
+	IndexedFiles int                `json:"indexed_files,omitempty"`
+}
+
+type searchResultItem struct {
+	FilePath  string  `json:"file_path"`
+	Symbol    string  `json:"symbol"`
+	Kind      string  `json:"kind"`
+	StartLine int     `json:"start_line"`
+	EndLine   int     `json:"end_line"`
+	Score     float32 `json:"score"`
+	Content   string  `json:"content,omitempty"`
+}
+
+type indexStatusOutput struct {
+	ProjectPath    string `json:"project_path"`
+	TotalFiles     int    `json:"total_files"`
+	IndexedFiles   int    `json:"indexed_files"`
+	TotalChunks    int    `json:"total_chunks"`
+	LastIndexedAt  string `json:"last_indexed_at"`
+	EmbeddingModel string `json:"embedding_model"`
+	Stale          bool   `json:"stale"`
+}
 
 var serverBinary string
 
@@ -33,7 +81,7 @@ func TestMain(m *testing.M) {
 	defer os.Remove(bin)
 
 	// Check Ollama health.
-	ollamaHost := envOrDefault("OLLAMA_HOST", "http://localhost:11434")
+	ollamaHost := config.EnvOrDefault("OLLAMA_HOST", "http://localhost:11434")
 	resp, err := http.Get(ollamaHost)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Ollama is unreachable at %s: %v — skipping E2E tests\n", ollamaHost, err)
@@ -48,15 +96,20 @@ func TestMain(m *testing.M) {
 // startServer launches the MCP server as a subprocess and returns a connected client session.
 func startServer(t *testing.T) *mcp.ClientSession {
 	t.Helper()
+	return startServerWithOpts(t, nil)
+}
+
+// startServerWithOpts launches the MCP server with custom client options.
+func startServerWithOpts(t *testing.T, opts *mcp.ClientOptions) *mcp.ClientSession {
+	t.Helper()
 
 	dataHome := t.TempDir()
-	ollamaHost := envOrDefault("OLLAMA_HOST", "http://localhost:11434")
+	ollamaHost := config.EnvOrDefault("OLLAMA_HOST", "http://localhost:11434")
 
-	cmd := exec.Command(serverBinary)
+	cmd := exec.Command(serverBinary, "stdio")
 	cmd.Env = []string{
 		"OLLAMA_HOST=" + ollamaHost,
 		"AGENT_INDEX_EMBED_MODEL=all-minilm",
-		"AGENT_INDEX_EMBED_DIMS=384",
 		"XDG_DATA_HOME=" + dataHome,
 		"HOME=" + os.Getenv("HOME"),
 		"PATH=" + os.Getenv("PATH"),
@@ -66,7 +119,7 @@ func startServer(t *testing.T) *mcp.ClientSession {
 	client := mcp.NewClient(&mcp.Implementation{
 		Name:    "e2e-test-client",
 		Version: "0.1.0",
-	}, nil)
+	}, opts)
 
 	ctx := context.Background()
 	session, err := client.Connect(ctx, transport, nil)
@@ -81,18 +134,95 @@ func startServer(t *testing.T) *mcp.ClientSession {
 	return session
 }
 
-// callSearch calls the semantic_search tool and returns the parsed output.
-func callSearch(t *testing.T, session *mcp.ClientSession, args map[string]any) SemanticSearchOutput {
+// getTextContent extracts the text from the first TextContent block in a CallToolResult.
+func getTextContent(t *testing.T, result *mcp.CallToolResult) string {
+	t.Helper()
+	if len(result.Content) == 0 {
+		t.Fatal("expected at least one Content block")
+	}
+	tc, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	return tc.Text
+}
+
+// headerRe matches result header lines like:
+// ── auth.go:10-19  ValidateToken (function) [0.66] ──
+// ── auth.go:1-1  package project (package) [-0.08] ──
+var headerRe = regexp.MustCompile(`^── (.+):(\d+)-(\d+)\s+(.+?)\s+\((\w+)\)\s+\[(-?\d+\.\d+)\] ──$`)
+
+// parseSearchText parses the plaintext output of semantic_search into a semanticSearchOutput.
+func parseSearchText(t *testing.T, text string) semanticSearchOutput {
 	t.Helper()
 
-	ctx := context.Background()
-	result, err := session.CallTool(ctx, &mcp.CallToolParams{
-		Name:      "semantic_search",
-		Arguments: mustJSON(t, args),
-	})
-	if err != nil {
-		t.Fatalf("CallTool semantic_search failed: %v", err)
+	var out semanticSearchOutput
+
+	// Parse "Found N results (indexed M files):" or "No results found."
+	if strings.HasPrefix(text, "No results found") {
+		return out
 	}
+	if strings.Contains(text, "(indexed") {
+		re := regexp.MustCompile(`\(indexed (\d+) files\)`)
+		if m := re.FindStringSubmatch(text); m != nil {
+			out.IndexedFiles, _ = strconv.Atoi(m[1])
+			out.Reindexed = true
+		}
+	}
+
+	// Find all header line positions, then extract content between them.
+	lines := strings.Split(text, "\n")
+	type headerMatch struct {
+		lineIdx   int
+		filePath  string
+		symbol    string
+		kind      string
+		startLine int
+		endLine   int
+		score     float32
+	}
+	var headers []headerMatch
+	for i, line := range lines {
+		m := headerRe.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		startLine, _ := strconv.Atoi(m[2])
+		endLine, _ := strconv.Atoi(m[3])
+		score, _ := strconv.ParseFloat(m[6], 32)
+		headers = append(headers, headerMatch{i, m[1], m[4], m[5], startLine, endLine, float32(score)})
+	}
+
+	for hi, h := range headers {
+		// Content runs from header line+1 to the line before the next header (or end).
+		contentEnd := len(lines)
+		if hi+1 < len(headers) {
+			contentEnd = headers[hi+1].lineIdx
+		}
+		var contentLines []string
+		for j := h.lineIdx + 1; j < contentEnd; j++ {
+			contentLines = append(contentLines, lines[j])
+		}
+		content := strings.TrimSpace(strings.Join(contentLines, "\n"))
+
+		out.Results = append(out.Results, searchResultItem{
+			FilePath:  h.filePath,
+			Symbol:    h.symbol,
+			Kind:      h.kind,
+			StartLine: h.startLine,
+			EndLine:   h.endLine,
+			Score:     h.score,
+			Content:   content,
+		})
+	}
+
+	return out
+}
+
+// callSearch calls the semantic_search tool and returns the parsed output.
+func callSearch(t *testing.T, session *mcp.ClientSession, args map[string]any) semanticSearchOutput {
+	t.Helper()
+	result := callSearchRaw(t, session, args)
 	if result.IsError {
 		for _, c := range result.Content {
 			if tc, ok := c.(*mcp.TextContent); ok {
@@ -101,17 +231,8 @@ func callSearch(t *testing.T, session *mcp.ClientSession, args map[string]any) S
 		}
 		t.Fatalf("semantic_search returned error (no text content)")
 	}
-
-	raw, err := json.Marshal(result.StructuredContent)
-	if err != nil {
-		t.Fatalf("failed to marshal StructuredContent: %v", err)
-	}
-
-	var out SemanticSearchOutput
-	if err := json.Unmarshal(raw, &out); err != nil {
-		t.Fatalf("failed to unmarshal SemanticSearchOutput: %v (raw: %s)", err, string(raw))
-	}
-	return out
+	text := getTextContent(t, result)
+	return parseSearchText(t, text)
 }
 
 // callSearchRaw calls semantic_search and returns the raw CallToolResult (for error testing).
@@ -129,8 +250,38 @@ func callSearchRaw(t *testing.T, session *mcp.ClientSession, args map[string]any
 	return result
 }
 
+// parseStatusText parses the plaintext output of index_status.
+func parseStatusText(t *testing.T, text string) indexStatusOutput {
+	t.Helper()
+
+	var out indexStatusOutput
+
+	// Parse "Index: <path>"
+	if m := regexp.MustCompile(`Index: (.+)`).FindStringSubmatch(text); m != nil {
+		out.ProjectPath = m[1]
+	}
+
+	// Parse "Files: N | Indexed: N | Chunks: N | Model: ..."
+	if m := regexp.MustCompile(`Files: (\d+) \| Indexed: (\d+) \| Chunks: (\d+) \| Model: (.+)`).FindStringSubmatch(text); m != nil {
+		out.TotalFiles, _ = strconv.Atoi(m[1])
+		out.IndexedFiles, _ = strconv.Atoi(m[2])
+		out.TotalChunks, _ = strconv.Atoi(m[3])
+		out.EmbeddingModel = m[4]
+	}
+
+	// Parse "Last indexed: ... | Stale: yes/no"
+	if m := regexp.MustCompile(`Last indexed: (.+?) \| Stale: (\w+)`).FindStringSubmatch(text); m != nil {
+		if m[1] != "never" {
+			out.LastIndexedAt = m[1]
+		}
+		out.Stale = m[2] == "yes"
+	}
+
+	return out
+}
+
 // callStatus calls the index_status tool and returns the parsed output.
-func callStatus(t *testing.T, session *mcp.ClientSession, args map[string]any) IndexStatusOutput {
+func callStatus(t *testing.T, session *mcp.ClientSession, args map[string]any) indexStatusOutput {
 	t.Helper()
 
 	ctx := context.Background()
@@ -145,16 +296,8 @@ func callStatus(t *testing.T, session *mcp.ClientSession, args map[string]any) I
 		t.Fatalf("index_status returned error: %+v", result.Content)
 	}
 
-	raw, err := json.Marshal(result.StructuredContent)
-	if err != nil {
-		t.Fatalf("failed to marshal StructuredContent: %v", err)
-	}
-
-	var out IndexStatusOutput
-	if err := json.Unmarshal(raw, &out); err != nil {
-		t.Fatalf("failed to unmarshal IndexStatusOutput: %v (raw: %s)", err, string(raw))
-	}
-	return out
+	text := getTextContent(t, result)
+	return parseStatusText(t, text)
 }
 
 // sampleProjectPath returns the absolute path to the test fixture.
@@ -178,7 +321,7 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 }
 
 // resultSymbols extracts symbol names from search results.
-func resultSymbols(results []SearchResultItem) []string {
+func resultSymbols(results []searchResultItem) []string {
 	names := make([]string, len(results))
 	for i, r := range results {
 		names[i] = r.Symbol
@@ -187,7 +330,7 @@ func resultSymbols(results []SearchResultItem) []string {
 }
 
 // findResult returns the first result matching the given symbol name, or nil.
-func findResult(results []SearchResultItem, symbol string) *SearchResultItem {
+func findResult(results []searchResultItem, symbol string) *searchResultItem {
 	for i := range results {
 		if results[i].Symbol == symbol {
 			return &results[i]
@@ -197,7 +340,7 @@ func findResult(results []SearchResultItem, symbol string) *SearchResultItem {
 }
 
 // rankOf returns the 0-based index of the first result matching symbol, or -1.
-func rankOf(results []SearchResultItem, symbol string) int {
+func rankOf(results []searchResultItem, symbol string) int {
 	for i, r := range results {
 		if r.Symbol == symbol {
 			return i
@@ -223,7 +366,6 @@ var validChunkKinds = map[string]bool{
 	"interface": true,
 	"const":     true,
 	"var":       true,
-	"package":   true,
 }
 
 // --- Tests ---
@@ -344,6 +486,80 @@ func TestE2E_IndexAndSearchResults(t *testing.T) {
 	if findResult(out.Results, "ValidateToken") == nil {
 		t.Errorf("expected ValidateToken in results for 'authentication token validation', got: %v", resultSymbols(out.Results))
 	}
+
+	// Every result should have code content.
+	for i, r := range out.Results {
+		if r.Content == "" {
+			t.Errorf("result[%d] %s: expected non-empty Content (code snippet)", i, r.Symbol)
+		}
+	}
+
+	// ValidateToken's content should contain the actual function code.
+	if vt := findResult(out.Results, "ValidateToken"); vt != nil {
+		if !strings.Contains(vt.Content, "func ValidateToken") {
+			t.Errorf("ValidateToken content should contain 'func ValidateToken', got: %s", vt.Content[:min(len(vt.Content), 200)])
+		}
+	}
+}
+
+func TestE2E_PlaintextContent(t *testing.T) {
+	session := startServer(t)
+	projectPath := sampleProjectPath(t)
+
+	// Get raw result to inspect Content (text) alongside StructuredContent.
+	result := callSearchRaw(t, session, map[string]any{
+		"query": "authentication token validation",
+		"path":  projectPath,
+		"limit": 3,
+	})
+
+	if result.IsError {
+		t.Fatalf("unexpected error: %+v", result.Content)
+	}
+
+	// Content should have exactly one TextContent block.
+	if len(result.Content) != 1 {
+		t.Fatalf("expected 1 Content block, got %d", len(result.Content))
+	}
+	tc, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+
+	// Plaintext should contain "Found N results".
+	if !strings.Contains(tc.Text, "Found") || !strings.Contains(tc.Text, "results") {
+		t.Errorf("plaintext should contain 'Found N results', got: %s", tc.Text[:min(len(tc.Text), 200)])
+	}
+
+	// Plaintext should contain actual code.
+	if !strings.Contains(tc.Text, "func ") {
+		t.Errorf("plaintext should contain code snippets with 'func ', got: %s", tc.Text[:min(len(tc.Text), 500)])
+	}
+
+	// No StructuredContent — only plaintext Content for LLM consumption.
+	if result.StructuredContent != nil {
+		t.Error("expected StructuredContent to be nil (plaintext-only mode)")
+	}
+
+	// Verify index_status also returns plaintext.
+	callSearch(t, session, map[string]any{"query": "anything", "path": projectPath})
+	statusResult, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "index_status",
+		Arguments: mustJSON(t, map[string]any{"path": projectPath}),
+	})
+	if err != nil {
+		t.Fatalf("index_status failed: %v", err)
+	}
+	if len(statusResult.Content) != 1 {
+		t.Fatalf("index_status: expected 1 Content block, got %d", len(statusResult.Content))
+	}
+	stc, ok := statusResult.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("index_status: expected TextContent, got %T", statusResult.Content[0])
+	}
+	if !strings.Contains(stc.Text, "Index:") || !strings.Contains(stc.Text, "Files:") {
+		t.Errorf("index_status plaintext should contain 'Index:' and 'Files:', got: %s", stc.Text)
+	}
 }
 
 func TestE2E_SearchRelevanceRanking(t *testing.T) {
@@ -360,6 +576,13 @@ func TestE2E_SearchRelevanceRanking(t *testing.T) {
 	healthRank := rankOf(out.Results, "HandleHealth")
 	tokenRank := rankOf(out.Results, "ValidateToken")
 	if healthRank == -1 {
+		// Show raw text for debugging.
+		raw := callSearchRaw(t, session, map[string]any{
+			"query": "HTTP request handler for health check endpoint",
+			"path":  projectPath,
+			"limit": 50,
+		})
+		t.Logf("raw text:\n%s", getTextContent(t, raw))
 		t.Fatalf("HandleHealth not found in results: %v", resultSymbols(out.Results))
 	}
 	if tokenRank == -1 {
@@ -414,13 +637,59 @@ func TestE2E_LimitParameter(t *testing.T) {
 		t.Errorf("limit=3: expected at most 3 results, got %d", len(out3.Results))
 	}
 
-	// No limit (omitted) should return results (default 10 kicks in).
+	// No limit (omitted) should return results (default 50 kicks in).
 	outDefault := callSearch(t, session, map[string]any{
-		"query": "user",
-		"path":  projectPath,
+		"query":     "user",
+		"path":      projectPath,
+		"min_score": -1,
 	})
 	if len(outDefault.Results) == 0 {
 		t.Error("no limit: expected results with default limit")
+	}
+}
+
+func TestE2E_MinScoreFilter(t *testing.T) {
+	session := startServer(t)
+	projectPath := sampleProjectPath(t)
+
+	// min_score=-1: get all results regardless of score.
+	outAll := callSearch(t, session, map[string]any{
+		"query":     "authentication token validation",
+		"path":      projectPath,
+		"limit":     50,
+		"min_score": -1,
+	})
+	if len(outAll.Results) == 0 {
+		t.Fatal("expected results")
+	}
+
+	// With a high min_score: should get fewer results.
+	outFiltered := callSearch(t, session, map[string]any{
+		"query":     "authentication token validation",
+		"path":      projectPath,
+		"limit":     50,
+		"min_score": 0.5,
+	})
+
+	if len(outFiltered.Results) >= len(outAll.Results) {
+		t.Errorf("min_score=0.5 should filter some results: got %d (unfiltered: %d)",
+			len(outFiltered.Results), len(outAll.Results))
+	}
+
+	// All filtered results should have score >= 0.5.
+	for i, r := range outFiltered.Results {
+		if r.Score < 0.5 {
+			t.Errorf("result[%d] %s: score %.2f below min_score 0.5", i, r.Symbol, r.Score)
+		}
+	}
+
+	// The top result should still be present.
+	if len(outFiltered.Results) == 0 {
+		t.Fatal("min_score=0.5 should still return the best match")
+	}
+	if outFiltered.Results[0].Symbol != outAll.Results[0].Symbol {
+		t.Errorf("top result should be the same: got %s vs %s",
+			outFiltered.Results[0].Symbol, outAll.Results[0].Symbol)
 	}
 }
 
@@ -543,6 +812,9 @@ func TestE2E_IndexStatus(t *testing.T) {
 	if statusBefore.TotalChunks != 0 {
 		t.Errorf("before indexing: expected TotalChunks=0, got %d", statusBefore.TotalChunks)
 	}
+	if !statusBefore.Stale {
+		t.Error("before indexing: expected Stale=true")
+	}
 
 	// Trigger indexing via search.
 	callSearch(t, session, map[string]any{
@@ -560,14 +832,17 @@ func TestE2E_IndexStatus(t *testing.T) {
 	if status.IndexedFiles != 5 {
 		t.Errorf("expected IndexedFiles=5, got %d", status.IndexedFiles)
 	}
-	if status.TotalChunks <= 15 {
-		t.Errorf("expected TotalChunks > 15 (fixture has ~21 symbols), got %d", status.TotalChunks)
+	if status.TotalChunks <= 10 {
+		t.Errorf("expected TotalChunks > 10 (fixture has ~16 symbols, no package chunks), got %d", status.TotalChunks)
 	}
 	if status.EmbeddingModel != "all-minilm" {
 		t.Errorf("expected EmbeddingModel=all-minilm, got %q", status.EmbeddingModel)
 	}
 	if status.ProjectPath != projectPath {
 		t.Errorf("expected ProjectPath=%s, got %s", projectPath, status.ProjectPath)
+	}
+	if status.Stale {
+		t.Error("after indexing: expected Stale=false")
 	}
 	if status.LastIndexedAt == "" {
 		t.Error("expected LastIndexedAt to be non-empty")
@@ -614,6 +889,120 @@ func TestE2E_ForceReindex(t *testing.T) {
 	}
 	if out3.IndexedFiles != 5 {
 		t.Errorf("force_reindex: expected IndexedFiles=5, got %d", out3.IndexedFiles)
+	}
+}
+
+func TestE2E_ProgressNotifications(t *testing.T) {
+	var mu sync.Mutex
+	var notifications []mcp.ProgressNotificationParams
+
+	session := startServerWithOpts(t, &mcp.ClientOptions{
+		ProgressNotificationHandler: func(_ context.Context, req *mcp.ProgressNotificationClientRequest) {
+			mu.Lock()
+			defer mu.Unlock()
+			notifications = append(notifications, *req.Params)
+		},
+	})
+	projectPath := sampleProjectPath(t)
+
+	ctx := context.Background()
+	params := &mcp.CallToolParams{
+		Name:      "semantic_search",
+		Arguments: mustJSON(t, map[string]any{"query": "authentication", "path": projectPath}),
+		Meta:      mcp.Meta{"progressToken": "test-progress-1"},
+	}
+
+	result, err := session.CallTool(ctx, params)
+	if err != nil {
+		t.Fatalf("CallTool failed: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("CallTool returned error: %+v", result.Content)
+	}
+
+	mu.Lock()
+	got := make([]mcp.ProgressNotificationParams, len(notifications))
+	copy(got, notifications)
+	mu.Unlock()
+
+	if len(got) == 0 {
+		t.Fatal("expected progress notifications, got none")
+	}
+
+	// All notifications should carry our progress token.
+	for i, n := range got {
+		if n.ProgressToken != "test-progress-1" {
+			t.Errorf("notification[%d]: expected ProgressToken='test-progress-1', got %v", i, n.ProgressToken)
+		}
+	}
+
+	// First notification should be "Found N files to index".
+	if !strings.Contains(got[0].Message, "Found") || !strings.Contains(got[0].Message, "files to index") {
+		t.Errorf("first notification message should contain 'Found ... files to index', got %q", got[0].Message)
+	}
+
+	// All notifications must have Total > 0 and Progress <= Total.
+	for i, n := range got {
+		if n.Total <= 0 {
+			t.Errorf("notification[%d]: expected Total > 0, got %f", i, n.Total)
+		}
+		if n.Progress > n.Total {
+			t.Errorf("notification[%d]: Progress (%f) > Total (%f)", i, n.Progress, n.Total)
+		}
+	}
+
+	// Should have at least one processing notification with file count.
+	hasProcessing := false
+	for _, n := range got {
+		if strings.Contains(n.Message, "Processing file") && strings.Contains(n.Message, "/") {
+			hasProcessing = true
+			break
+		}
+	}
+	if !hasProcessing {
+		t.Error("expected at least one 'Processing file N/M' progress notification")
+	}
+
+	// Should have at least one embed notification.
+	hasEmbed := false
+	for _, n := range got {
+		if strings.Contains(n.Message, "Embedded") {
+			hasEmbed = true
+			break
+		}
+	}
+	if !hasEmbed {
+		t.Error("expected at least one 'Embedded' progress notification")
+	}
+
+	// Last notification should be the completion message.
+	last := got[len(got)-1]
+	if !strings.Contains(last.Message, "Indexing complete") {
+		t.Errorf("last notification should contain 'Indexing complete', got %q", last.Message)
+	}
+
+	// Second search (no changes) should NOT produce progress notifications
+	// because no indexing happens.
+	mu.Lock()
+	notifications = notifications[:0]
+	mu.Unlock()
+
+	params2 := &mcp.CallToolParams{
+		Name:      "semantic_search",
+		Arguments: mustJSON(t, map[string]any{"query": "authentication", "path": projectPath}),
+		Meta:      mcp.Meta{"progressToken": "test-progress-2"},
+	}
+
+	if _, err := session.CallTool(ctx, params2); err != nil {
+		t.Fatalf("second CallTool failed: %v", err)
+	}
+
+	mu.Lock()
+	got2 := len(notifications)
+	mu.Unlock()
+
+	if got2 != 0 {
+		t.Errorf("expected 0 progress notifications on cached search, got %d", got2)
 	}
 }
 
