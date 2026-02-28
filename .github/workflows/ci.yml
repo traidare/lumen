@@ -19,10 +19,10 @@ jobs:
           cache: true
 
       - name: Test
-        run: CGO_ENABLED=1 go test ./...
+        run: CGO_ENABLED=1 go test -tags=fts5 ./...
 
       - name: Vet
-        run: go vet ./...
+        run: go vet -tags=fts5 ./...
 
   lint:
     name: Lint
@@ -39,6 +39,7 @@ jobs:
         uses: golangci/golangci-lint-action@v8
         with:
           version: latest
+          args: --build-tags=fts5
 
   e2e:
     name: E2E
@@ -67,7 +68,7 @@ jobs:
         run: 'curl -sf http://localhost:11434/api/pull -d ''{"name":"all-minilm"}'''
 
       - name: E2E tests
-        run: CGO_ENABLED=1 go test -tags=e2e -timeout=5m -v -count=1 ./...
+        run: CGO_ENABLED=1 go test -tags=fts5,e2e -timeout=5m -v -count=1 ./...
         env:
           OLLAMA_HOST: http://localhost:11434
           AGENT_INDEX_EMBED_MODEL: all-minilm

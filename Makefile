@@ -1,19 +1,21 @@
-BINARY := agent-index
-GO     := go
+BINARY   := agent-index
+GO       := go
+GOTAGS   := fts5
+GOFLAGS  := -tags=$(GOTAGS)
 
 .PHONY: build test e2e lint vet tidy clean
 
 build:
-	CGO_ENABLED=1 $(GO) build -o $(BINARY) .
+	CGO_ENABLED=1 $(GO) build $(GOFLAGS) -o $(BINARY) .
 
 test:
-	CGO_ENABLED=1 $(GO) test ./...
+	CGO_ENABLED=1 $(GO) test $(GOFLAGS) ./...
 
 install:
-	CGO_ENABLED=1 $(GO) install ./...
+	CGO_ENABLED=1 $(GO) install $(GOFLAGS) ./...
 
 e2e:
-	CGO_ENABLED=1 $(GO) test -tags=e2e -timeout=5m -v -count=1 ./...
+	CGO_ENABLED=1 $(GO) test -tags=$(GOTAGS),e2e -timeout=5m -v -count=1 ./...
 
 lint:
 	golangci-lint run
