@@ -546,6 +546,9 @@ func TestDefaultLanguages_AllExtensionsPresent(t *testing.T) {
 		".php":  []byte("<?php\nfunction foo() {}"),
 		".md":   []byte("# Foo\nSome content."),
 		".mdx":  []byte("# Foo\nSome content."),
+		".yaml": []byte("foo: bar\n"),
+		".yml":  []byte("foo: bar\n"),
+		".json": []byte(`{"foo": "bar"}`),
 	}
 
 	langs := chunker.DefaultLanguages()
