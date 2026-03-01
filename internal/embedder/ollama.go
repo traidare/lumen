@@ -1,3 +1,17 @@
+// Copyright 2026 Aeneas Rekkas
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package embedder
 
 import (
@@ -19,18 +33,21 @@ const (
 
 // Ollama implements the Embedder interface using a local Ollama server.
 type Ollama struct {
-	model      string
-	dimensions int
-	baseURL    string
-	client     *http.Client
+	model         string
+	dimensions    int
+	contextLength int
+	baseURL       string
+	client        *http.Client
 }
 
 // NewOllama creates a new Ollama embedder that calls the /api/embed endpoint.
-func NewOllama(model string, dimensions int, baseURL string) (*Ollama, error) {
+// contextLength sets num_ctx in Ollama requests; 0 means use Ollama's default.
+func NewOllama(model string, dimensions int, contextLength int, baseURL string) (*Ollama, error) {
 	return &Ollama{
-		model:      model,
-		dimensions: dimensions,
-		baseURL:    baseURL,
+		model:         model,
+		dimensions:    dimensions,
+		contextLength: contextLength,
+		baseURL:       baseURL,
 		client: &http.Client{
 			Timeout: 120 * time.Second,
 		},
@@ -49,8 +66,9 @@ func (o *Ollama) ModelName() string {
 
 // ollamaEmbedRequest is the JSON body sent to /api/embed.
 type ollamaEmbedRequest struct {
-	Model string   `json:"model"`
-	Input []string `json:"input"`
+	Model   string         `json:"model"`
+	Input   []string       `json:"input"`
+	Options map[string]any `json:"options,omitempty"`
 }
 
 // ollamaEmbedResponse is the JSON body returned from /api/embed.
@@ -86,6 +104,9 @@ func (o *Ollama) embedBatch(ctx context.Context, texts []string) ([][]float32, e
 	reqBody := ollamaEmbedRequest{
 		Model: o.model,
 		Input: texts,
+	}
+	if o.contextLength > 0 {
+		reqBody.Options = map[string]any{"num_ctx": o.contextLength}
 	}
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
