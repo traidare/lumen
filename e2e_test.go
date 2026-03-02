@@ -69,7 +69,7 @@ var serverBinary string
 
 func TestMain(m *testing.M) {
 	// Build the server binary.
-	bin := filepath.Join(os.TempDir(), "agent-index-e2e-test")
+	bin := filepath.Join(os.TempDir(), "lumen-e2e-test")
 	cmd := exec.Command("go", "build", "-o", bin, ".")
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
 	cmd.Stdout = os.Stdout
