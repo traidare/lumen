@@ -411,13 +411,13 @@ func runStdio(_ *cobra.Command, _ []string) error {
 		Name: "semantic_search",
 		Description: `Search indexed codebase using natural language. Returns file paths and line ranges of semantically matching code chunks. Auto-indexes if the index is stale or empty.
 
-Use this tool for ANY code search task, including:
+Use this tool for ANY code or file search task, including:
 - Finding where functionality is implemented (e.g. "rate limiter", "authentication handler", "database connection pool")
-- Locating code related to a concept, feature, or domain term
+- Locating code and docs related to a concept, feature, or domain term
 - Discovering how a system works or where logic lives
 - Finding relevant code before making changes
 
-This tool understands code semantics — it finds results that keyword search (grep) would miss because it matches meaning, not just text. Prefer this over grep/glob for code discovery.
+This tool understands code and text semantics. It finds results that keyword search (grep) would miss because it matches meaning, not just text. Prefer this over grep/glob for code discovery.
 
 If a search returns no results, retry with a lower min_score (e.g. 0.0 or -1) before trying a different query — the embedding model may score the match below the default threshold.`,
 	}, indexers.handleSemanticSearch)
