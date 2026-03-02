@@ -23,6 +23,17 @@
 - **Panics**: Only during package initialization, never in business logic
 - **No "not found" confusion**: Distinguish between "resource not found" and actual database errors
 
+### Git Conventional Commits
+- **Format**: Follow [Conventional Commits](https://www.conventionalcommits.org/) specification
+- **Types**: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`, `ci`
+- **Scope**: Optional, package or component name (e.g., `fix(chunker): ...`, `feat(store): ...`)
+- **Breaking changes**: Add `!` after type/scope (e.g., `feat!: ...`) or `BREAKING CHANGE:` footer
+- **Examples**:
+  - `fix: handle nil pointers in search results`
+  - `feat(store): add batch upsert for chunks`
+  - `docs: update README with new API examples`
+  - `refactor: simplify merkle tree comparison`
+
 ### Idiomatic Go Patterns
 - **Interface satisfaction**: Implicit, verified by compilation (no "implements" comments)
 - **Error as value**: Return error as final argument, check immediately
