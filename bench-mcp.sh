@@ -126,7 +126,7 @@ run() {
   local allowed_tools_arg=()
   [[ "$mcp_cfg" == "$MCP_ENABLED" ]] && allowed_tools_arg=(--allowedTools "mcp__lumen__semantic_search,mcp__lumen__index_status")
 
-  DISABLE_PROMPT_CACHING=1 claude \
+  claude \
     --output-format stream-json \
     --verbose \
     --model "$model" \
