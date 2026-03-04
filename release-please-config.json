@@ -10,12 +10,12 @@
         {
           "type": "json",
           "path": ".claude-plugin/marketplace.json",
-          "json-path": "$.metadata.version"
+          "jsonpath": "$.metadata.version"
         },
         {
           "type": "json",
           "path": ".claude-plugin/marketplace.json",
-          "json-path": "$.plugins[0].version"
+          "jsonpath": "$.plugins[0].version"
         }
       ]
     }
