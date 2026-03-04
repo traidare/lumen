@@ -1,0 +1,4 @@
+bench-results/*
+testdata/fixtures/*
+testdata/snapshots/*
+CHANGELOG.md

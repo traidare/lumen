@@ -34,6 +34,7 @@ clean:
 format:
 	goimports -w .
 	npx --yes prettier --write "**/*.{json,md,mdx,yaml,yml}"
+	npx --yes doctoc --github README.md
 
 plugin-dev: build-local
 	@echo "Run: claude --plugin-dir ."
