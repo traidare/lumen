@@ -5,6 +5,19 @@
   "bump-patch-for-minor-pre-major": true,
   "include-v-in-tag": true,
   "packages": {
-    ".": {}
+    ".": {
+      "extra-files": [
+        {
+          "type": "json",
+          "path": ".claude-plugin/marketplace.json",
+          "json-path": "$.metadata.version"
+        },
+        {
+          "type": "json",
+          "path": ".claude-plugin/marketplace.json",
+          "json-path": "$.plugins[0].version"
+        }
+      ]
+    }
   }
 }
