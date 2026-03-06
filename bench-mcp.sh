@@ -39,7 +39,7 @@ Q_DIFFICULTY=(
 )
 
 # ── Models ────────────────────────────────────────────────────────────────────
-MODELS=("sonnet" "opus")
+MODELS=("haiku")
 FILTER_MODELS=()
 FILTER_QUESTIONS=()
 
