@@ -1,21 +1,15 @@
 {
   "id": "typescript-hard",
   "language": "typescript",
-  "repo": "https://github.com/honojs/hono",
-  "base_commit": "50869562980628b2984f73e064bb80691e5286bc",
-  "fix_commit": "8217d9ece6f4d302e446b8dc353d1b3cbf51d92e",
-  "issue_url": "https://github.com/honojs/hono/issues/4789",
-  "issue_title": "link rel=canonical is silently removed when it shares the same href as link rel=alternate hreflang",
-  "issue_body": "When using jsxRenderer, a <link rel=\"canonical\"> tag is silently dropped from the rendered HTML if a <link rel=\"alternate\" hreflang=\"...\"> tag shares the same href.\n\nOn a localized EN page (e.g. /en/about), the canonical URL and the hreflang=\"en\" alternate URL are identical by design. When both are declared in the renderer:\n\n```tsx\n<link rel=\"canonical\" href=\"https://example.com/en/about\" />\n<link rel=\"alternate\" hreflang=\"en\" href=\"https://example.com/en/about\" />\n<link rel=\"alternate\" hreflang=\"ja\" href=\"https://example.com/ja/about\" />\n```\n\nThe rendered HTML becomes:\n\n```html\n<!-- canonical is missing -->\n<link rel=\"alternate\" hreflang=\"en\" href=\"https://example.com/en/about\" />\n<link rel=\"alternate\" hreflang=\"ja\" href=\"https://example.com/ja/about\" />\n```\n\nThe deduplication key for link elements currently uses only the href attribute. The deduplication logic uses OR semantics: if any key in the dedup keys matches an existing tag's props, the new tag is considered a duplicate. Because rel=\"canonical\" and rel=\"alternate\" hreflang=\"en\" share the same href, the canonical tag is treated as a duplicate of the already-registered alternate tag and removed from the buffer.\n\nTwo link elements should only be considered duplicates when all identifying attributes match. The current behavior incorrectly deduplicates link elements that have different rel attributes but the same href.\n\nAdditionally, React 19 only deduplicates link elements that are stylesheets with a precedence attribute. Other link types (canonical, alternate, preload, icon, preconnect, etc.) should not be subject to href-based deduplication at all. The fix should align Hono's JSX link hoisting/dedupe behavior with this model.\n\nThe bug affects both the server-side JSX renderer (src/jsx/intrinsic-element/) and the DOM renderer (src/jsx/dom/intrinsic-element/).\n\nEnvironment:\n- Hono: 4.11.9\n- Reproduction: placing <link rel=\"canonical\"> and <link rel=\"alternate\" hreflang> with the same href in jsxRenderer",
+  "repo": "https://github.com/unjs/citty",
+  "base_commit": "b7a18fa484979a0f8f9c10aa8a88a250c027fa20",
+  "fix_commit": "7393b4bb423e4cd02680c30dd94b9a5e43fea7fd",
+  "issue_url": "https://github.com/unjs/citty/issues/209",
+  "issue_title": "Negative flag (--no-) negation does not propagate to aliases or main option",
+  "issue_body": "When using the `--no-` prefix to negate a boolean flag that has aliases, the negation is not correctly propagated between the alias and the main option name.\n\nFor example, given a boolean argument `verbose` with default `true` and alias `v`:\n\n- Running with `--no-v` sets `v=false` but leaves `verbose=true` (the default), because the propagation logic only copies values when the target is `undefined`. Since `verbose` has a default of `true`, it is not `undefined`, so the negated value from the alias never overwrites it.\n\n- Similarly, running with `--no-verbose` sets `verbose=false` but does not propagate the negation to the alias `v`.\n\nReproduction:\n\n```ts\nimport { parseRawArgs } from 'citty';\n\n// Case 1: --no-alias should propagate to main option\nconst result1 = parseRawArgs(['--no-v'], {\n  boolean: ['verbose'],\n  alias: { v: ['verbose'] },\n  default: { verbose: true },\n});\nconsole.log(result1);\n// Actual:   { _: [], v: false, verbose: true }\n// Expected: { _: [], v: false, verbose: false }\n\n// Case 2: --no-main should propagate to aliases\nconst result2 = parseRawArgs(['--no-verbose'], {\n  boolean: ['verbose'],\n  alias: { v: ['verbose'] },\n  default: { verbose: true },\n});\nconsole.log(result2);\n// Actual:   { _: [], verbose: false }  (v is missing/undefined)\n// Expected: { _: [], v: false, verbose: false }\n```\n\nThe root cause is in the argument parser's handling of negated flags. When a `--no-` prefixed flag is encountered, the parser sets only the literal flag name to `false` without resolving it through the alias mapping. The negation needs to be resolved bidirectionally: if the negated name is an alias, the main option should also be set to `false`; if the negated name is the main option, all its aliases should also be set to `false`. This must happen before the general alias propagation step, which skips values that are already defined (non-undefined), so default values block the propagation of negated flags.",
   "gold_patch_file": "patches/typescript-hard.patch",
-  "expected_files": [
-    "src/jsx/dom/intrinsic-element/components.test.tsx",
-    "src/jsx/dom/intrinsic-element/components.ts",
-    "src/jsx/intrinsic-element/common.ts",
-    "src/jsx/intrinsic-element/components.test.tsx",
-    "src/jsx/intrinsic-element/components.ts"
-  ],
+  "expected_files": ["src/_parser.ts", "test/parser.test.ts"],
   "setup_commands": ["npm install"],
-  "test_command": "npx vitest run src/jsx/intrinsic-element/components.test.tsx src/jsx/dom/intrinsic-element/components.test.tsx",
+  "test_command": "npx vitest run test/parser.test.ts",
   "timeout_s": 300
 }
