@@ -215,14 +215,13 @@ func TestStore_ChunkIndexesExist(t *testing.T) {
 
 	var count int
 	err = s.db.QueryRow(
-		`SELECT count(*) FROM sqlite_master
-		 WHERE type='index' AND name = 'idx_chunks_file_path'`,
+		`SELECT count(*) FROM sqlite_master WHERE type='index' AND name = 'idx_chunks_file_path'`,
 	).Scan(&count)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if count != 1 {
-		t.Fatalf("expected 1 index, got %d", count)
+		t.Fatalf("expected idx_chunks_file_path to exist, got %d", count)
 	}
 }
 

@@ -495,6 +495,12 @@ func (s *Store) TopSymbols(n int) ([]string, error) {
 	return symbols, rows.Err()
 }
 
+// Analyze runs ANALYZE on the database so the query planner has up-to-date
+// statistics. Call once after a full index pass, not after every batch.
+func (s *Store) Analyze() {
+	_, _ = s.db.Exec("ANALYZE")
+}
+
 // Close closes the underlying database connection.
 func (s *Store) Close() error {
 	return s.db.Close()
