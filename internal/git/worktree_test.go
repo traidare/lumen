@@ -178,6 +178,150 @@ func TestListWorktrees_NotARepo(t *testing.T) {
 	}
 }
 
+func TestIsGitRoot_WithGitDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !IsGitRoot(dir) {
+		t.Fatal("expected true for directory with .git dir")
+	}
+}
+
+func TestIsGitRoot_WithGitFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: /some/path\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !IsGitRoot(dir) {
+		t.Fatal("expected true for directory with .git file (worktree)")
+	}
+}
+
+func TestIsGitRoot_NoGit(t *testing.T) {
+	dir := t.TempDir()
+	if IsGitRoot(dir) {
+		t.Fatal("expected false when no .git exists")
+	}
+}
+
+func TestDiscoverNestedGitRepos_FindsNestedRepos(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+
+	// Create a non-git parent with two git sub-repos.
+	parent := t.TempDir()
+	repoA := filepath.Join(parent, "sub-a")
+	repoB := filepath.Join(parent, "sub-b")
+	if err := os.Mkdir(repoA, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(repoB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run(t, repoA, "git", "init")
+	run(t, repoB, "git", "init")
+
+	repos := DiscoverNestedGitRepos(parent)
+	if len(repos) != 2 {
+		t.Fatalf("expected 2 nested repos, got %d: %v", len(repos), repos)
+	}
+
+	// Resolve symlinks for comparison.
+	resolvedA, _ := filepath.EvalSymlinks(repoA)
+	resolvedB, _ := filepath.EvalSymlinks(repoB)
+	want := map[string]bool{resolvedA: true, resolvedB: true}
+	for _, r := range repos {
+		resolved, _ := filepath.EvalSymlinks(r)
+		if !want[resolved] {
+			t.Errorf("unexpected repo path %q", r)
+		}
+	}
+}
+
+func TestDiscoverNestedGitRepos_SkipsWhenRootIsGit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+
+	// Parent is itself a git repo — should return nil.
+	parent := t.TempDir()
+	run(t, parent, "git", "init")
+
+	sub := filepath.Join(parent, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run(t, sub, "git", "init")
+
+	repos := DiscoverNestedGitRepos(parent)
+	if len(repos) != 0 {
+		t.Fatalf("expected nil when root is a git repo, got %v", repos)
+	}
+}
+
+func TestDiscoverNestedGitRepos_DeeplyNested(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+
+	// Non-git parent, with a git repo nested two levels deep.
+	parent := t.TempDir()
+	deep := filepath.Join(parent, "a", "b", "repo")
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run(t, deep, "git", "init")
+
+	repos := DiscoverNestedGitRepos(parent)
+	if len(repos) != 1 {
+		t.Fatalf("expected 1 nested repo, got %d: %v", len(repos), repos)
+	}
+
+	resolved, _ := filepath.EvalSymlinks(deep)
+	got, _ := filepath.EvalSymlinks(repos[0])
+	if got != resolved {
+		t.Errorf("expected %q, got %q", resolved, got)
+	}
+}
+
+func TestDiscoverNestedGitRepos_NoNestedRepos(t *testing.T) {
+	parent := t.TempDir()
+	repos := DiscoverNestedGitRepos(parent)
+	if len(repos) != 0 {
+		t.Fatalf("expected nil for directory with no nested repos, got %v", repos)
+	}
+}
+
+func TestDiscoverNestedGitRepos_DoesNotDescendIntoGitRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+
+	// Non-git parent with a git repo that itself contains another git repo.
+	// Only the outer one should be discovered.
+	parent := t.TempDir()
+	outer := filepath.Join(parent, "outer")
+	inner := filepath.Join(outer, "inner")
+	if err := os.MkdirAll(inner, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run(t, outer, "git", "init")
+	run(t, inner, "git", "init")
+
+	repos := DiscoverNestedGitRepos(parent)
+	if len(repos) != 1 {
+		t.Fatalf("expected 1 repo (outer only), got %d: %v", len(repos), repos)
+	}
+
+	resolved, _ := filepath.EvalSymlinks(outer)
+	got, _ := filepath.EvalSymlinks(repos[0])
+	if got != resolved {
+		t.Errorf("expected %q, got %q", resolved, got)
+	}
+}
+
 func run(t *testing.T, dir string, name string, args ...string) {
 	t.Helper()
 	cmd := exec.Command(name, args...)

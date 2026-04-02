@@ -17,6 +17,7 @@ package cmd
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -301,6 +302,61 @@ func TestGenerateSessionContextInternal_MessageWithoutDonor(t *testing.T) {
 	)
 	if !strings.Contains(result, "background") {
 		t.Errorf("expected 'background' in context when no donor, got: %s", result)
+	}
+}
+
+func TestGenerateSessionContextInternal_NormalizesToGitRoot(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", tmpDir)
+
+	// Create a git repo with a subdirectory.
+	repoDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(filepath.Join(repoDir, "sub", "deep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "init")
+	cmd.Dir = repoDir
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test",
+		"GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test",
+		"GIT_COMMITTER_EMAIL=test@test.com",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init failed: %v\n%s", err, out)
+	}
+
+	// Create a DB for the git root so the hook finds it.
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	// Resolve symlinks to match what git rev-parse --show-toplevel returns.
+	resolvedRepo, err := filepath.EvalSymlinks(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := config.DBPathForProject(resolvedRepo, cfg.Model)
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeHookTestDB(t, dbPath, time.Now().Add(-30*time.Second))
+
+	// Pass a subdirectory as cwd — the hook should normalize to the git root
+	// and find the existing DB.
+	subDir := filepath.Join(resolvedRepo, "sub", "deep")
+	result := generateSessionContextInternal("lumen", subDir,
+		func(_, _ string) string { return "" },
+		func(_ string) {},
+	)
+
+	// The result should contain "index ready" because the DB exists at the git root.
+	if !strings.Contains(result, "index ready") {
+		t.Errorf("expected hook to normalize cwd to git root and find index, got: %s", result)
 	}
 }
 

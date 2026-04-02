@@ -879,6 +879,61 @@ func TestIndex_SkipsBinaryFiles(t *testing.T) {
 	}
 }
 
+func TestIndexer_SkipsNestedGitReposInNonGitParent(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+
+	// Create a non-git parent with a loose file and a nested git repo with its own file.
+	parent := t.TempDir()
+	writeGoFile(t, parent, "loose.go", `package loose
+
+func Loose() {}
+`)
+
+	nestedRepo := filepath.Join(parent, "nested-repo")
+	if err := os.Mkdir(nestedRepo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "init")
+	cmd.Dir = nestedRepo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init failed: %v\n%s", err, out)
+	}
+	writeGoFile(t, nestedRepo, "nested.go", `package nested
+
+func Nested() {}
+`)
+
+	emb := &mockEmbedder{dims: 4, model: "test-model"}
+	idx, err := NewIndexer(":memory:", emb, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = idx.Close() }()
+
+	stats, err := idx.Index(context.Background(), parent, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Only the loose file should be indexed — nested git repo files should be skipped.
+	if stats.IndexedFiles != 1 {
+		t.Fatalf("expected 1 indexed file (loose.go only), got %d", stats.IndexedFiles)
+	}
+
+	// Verify the indexed file is loose.go, not nested.go.
+	results, err := idx.Search(context.Background(), parent, []float32{0.1, 0.1, 0.1, 0.1}, 10, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range results {
+		if strings.Contains(r.FilePath, "nested-repo") {
+			t.Errorf("nested repo file should not be indexed, found: %s", r.FilePath)
+		}
+	}
+}
+
 func writeGoFile(t *testing.T, dir, name, content string) {
 	t.Helper()
 	path := filepath.Join(dir, name)

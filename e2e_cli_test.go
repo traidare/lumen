@@ -29,6 +29,28 @@ import (
 	"github.com/ory/lumen/internal/config"
 )
 
+// gitSampleProject copies testdata/sample-project into a temp directory and
+// initialises a git repo so that RepoRoot resolves to the temp dir itself
+// (not the parent lumen repo).
+func gitSampleProject(t *testing.T) string {
+	t.Helper()
+	tmp := t.TempDir()
+	copyDir(t, sampleProjectPath(t), tmp)
+	for _, args := range [][]string{
+		{"init"},
+		{"add", "."},
+		{"commit", "-m", "init", "--allow-empty"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = tmp
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+	}
+	return tmp
+}
+
 // runCLI runs the lumen binary with the given args and returns stdout, stderr, and any error.
 func runCLI(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
@@ -65,7 +87,7 @@ func runCLIWithDataHome(t *testing.T, dataHome string, args ...string) (stdout, 
 
 func TestE2E_CLI_IndexIdempotent(t *testing.T) {
 	t.Parallel()
-	projectPath := sampleProjectPath(t)
+	projectPath := gitSampleProject(t)
 	dataHome := t.TempDir()
 
 	// First index.
@@ -86,7 +108,7 @@ func TestE2E_CLI_IndexIdempotent(t *testing.T) {
 
 func TestE2E_CLI_IndexForceReindex(t *testing.T) {
 	t.Parallel()
-	projectPath := sampleProjectPath(t)
+	projectPath := gitSampleProject(t)
 	dataHome := t.TempDir()
 
 	// First index.
@@ -123,7 +145,7 @@ func openIndexDB(t *testing.T, dataHome, projectPath string) *sql.DB {
 
 func TestE2E_CLI_SQLVerifySchema(t *testing.T) {
 	t.Parallel()
-	projectPath := sampleProjectPath(t)
+	projectPath := gitSampleProject(t)
 	dataHome := t.TempDir()
 
 	// Index first.
@@ -323,7 +345,7 @@ func TestE2E_CLI_SQLVerifySchema(t *testing.T) {
 
 func TestE2E_CLI_SQLVerifyKNN(t *testing.T) {
 	t.Parallel()
-	projectPath := sampleProjectPath(t)
+	projectPath := gitSampleProject(t)
 	dataHome := t.TempDir()
 
 	// Index the project.

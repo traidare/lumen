@@ -26,6 +26,7 @@ import (
 
 	"github.com/ory/lumen/internal/config"
 	"github.com/ory/lumen/internal/embedder"
+	"github.com/ory/lumen/internal/git"
 	"github.com/ory/lumen/internal/index"
 	"github.com/ory/lumen/internal/indexlock"
 	"github.com/ory/lumen/internal/tui"
@@ -63,6 +64,24 @@ func runIndex(cmd *cobra.Command, args []string) error {
 	projectPath, err := filepath.Abs(args[0])
 	if err != nil {
 		return fmt.Errorf("resolve path: %w", err)
+	}
+
+	// Normalize to the git repository root when inside a git repo so that
+	// indexing a subdirectory produces the same DB as indexing the repo root.
+	if root, err := git.RepoRoot(projectPath); err == nil {
+		projectPath = root
+	}
+
+	// When the project directory is not a git repo, discover nested git repos
+	// and index each one separately before indexing the parent (which will
+	// only contain "loose" files not belonging to any nested repo).
+	if nestedRepos := git.DiscoverNestedGitRepos(projectPath); len(nestedRepos) > 0 {
+		for _, repo := range nestedRepos {
+			if err := indexSingleProject(cmd, cfg, repo, logger); err != nil {
+				logger.Error("indexing nested repo failed", "repo", repo, "err", err)
+				fmt.Fprintf(os.Stderr, "Warning: failed to index nested repo %s: %v\n", repo, err)
+			}
+		}
 	}
 
 	dbPath := config.DBPathForProject(projectPath, cfg.Model)
@@ -178,6 +197,58 @@ func setupIndexer(cfg *config.Config, dbPath string, logger *slog.Logger) (*inde
 	}
 	idx.SetLogger(logger)
 	return idx, nil
+}
+
+// indexSingleProject indexes a single project path with its own DB, lock, and
+// indexer. Used to auto-index nested git repos discovered in a non-git parent.
+func indexSingleProject(cmd *cobra.Command, cfg config.Config, projectPath string, logger *slog.Logger) error {
+	dbPath := config.DBPathForProject(projectPath, cfg.Model)
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		return fmt.Errorf("create db directory: %w", err)
+	}
+
+	lockPath := indexlock.LockPathForDB(dbPath)
+	lock, err := indexlock.TryAcquire(lockPath)
+	if err != nil {
+		return fmt.Errorf("acquire index lock: %w", err)
+	}
+	if lock == nil {
+		logger.Info("index skipped: another indexer is already running", "project", projectPath)
+		fmt.Fprintf(os.Stderr, "Skipping %s: another indexer is already running.\n", projectPath)
+		return nil
+	}
+	defer lock.Release()
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	idx, err := setupIndexer(&cfg, dbPath, logger)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = idx.Close() }()
+
+	logger.Info("indexing nested repo", "project", projectPath, "model", cfg.Model)
+	p := tui.NewProgress(os.Stderr)
+	p.Info(fmt.Sprintf("Indexing nested repo %s", projectPath))
+
+	start := time.Now()
+	stats, err := performIndexing(ctx, cmd, idx, projectPath, p)
+	if err != nil {
+		if ctx.Err() != nil {
+			logger.Info("indexing cancelled by signal", "project", projectPath)
+			return nil
+		}
+		return err
+	}
+
+	elapsed := time.Since(start).Round(time.Millisecond)
+	logger.Info("nested repo indexed", "project", projectPath,
+		"indexed_files", stats.IndexedFiles, "chunks_created", stats.ChunksCreated,
+		"elapsed", elapsed.String())
+	fmt.Printf("Nested repo %s: %d files, %d chunks in %s.\n",
+		projectPath, stats.IndexedFiles, stats.ChunksCreated, elapsed)
+	return nil
 }
 
 func performIndexing(ctx context.Context, cmd *cobra.Command, idx *index.Indexer, projectPath string, p *tui.Progress) (index.Stats, error) {

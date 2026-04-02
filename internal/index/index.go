@@ -135,9 +135,18 @@ func (idx *Indexer) Close() error {
 	return idx.store.Close()
 }
 
-// makeSkip returns a SkipFunc for projectDir that excludes internal worktrees.
+// makeSkip returns a SkipFunc for projectDir that excludes internal worktrees
+// and, when projectDir is not itself a git repository, any nested git repos.
 func makeSkip(projectDir string) merkle.SkipFunc {
-	return merkle.MakeSkipWithExtra(projectDir, chunker.SupportedExtensions(), git.InternalWorktreePaths(projectDir))
+	extraSkip := git.InternalWorktreePaths(projectDir)
+	if !git.IsGitRoot(projectDir) {
+		for _, repoPath := range git.DiscoverNestedGitRepos(projectDir) {
+			if rel, err := filepath.Rel(projectDir, repoPath); err == nil {
+				extraSkip = append(extraSkip, rel)
+			}
+		}
+	}
+	return merkle.MakeSkipWithExtra(projectDir, chunker.SupportedExtensions(), extraSkip)
 }
 
 // Index indexes the project at projectDir. If force is true, all files are

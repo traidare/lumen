@@ -115,6 +115,42 @@ func RepoRoot(projectPath string) (string, error) {
 	return root, nil
 }
 
+// IsGitRoot reports whether path is a git repository or worktree root
+// (i.e. contains a .git directory or .git file).
+func IsGitRoot(path string) bool {
+	_, err := os.Lstat(filepath.Join(path, ".git"))
+	return err == nil
+}
+
+// DiscoverNestedGitRepos walks rootPath and returns absolute paths of all
+// nested directories that are git repo roots. It stops descending into
+// discovered repos. Returns nil if rootPath is itself a git root or contains
+// no nested repos.
+func DiscoverNestedGitRepos(rootPath string) []string {
+	if IsGitRoot(rootPath) {
+		return nil
+	}
+
+	var repos []string
+	_ = filepath.WalkDir(rootPath, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return filepath.SkipDir
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		if path == rootPath {
+			return nil
+		}
+		if IsGitRoot(path) {
+			repos = append(repos, path)
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	return repos
+}
+
 // ListWorktrees returns the absolute paths of all worktrees (including the
 // main working tree) for the repository containing projectPath. Returns nil
 // if git is not available or projectPath is not inside a git repository.

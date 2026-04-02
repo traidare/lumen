@@ -25,6 +25,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ory/lumen/internal/config"
+	"github.com/ory/lumen/internal/git"
 	"github.com/ory/lumen/internal/store"
 )
 
@@ -114,6 +115,12 @@ func generateSessionContext(mcpName, cwd string) string {
 func generateSessionContextInternal(mcpName, cwd string, findDonor func(string, string) string, bgIndexer func(string)) string {
 	toolRef := "mcp__" + mcpName + "__semantic_search"
 	directive := "Call " + toolRef + " first for any code discovery task — before Grep, Bash, or Read."
+
+	// Normalize cwd to the git repository root so the DB path matches what
+	// `lumen index` and the MCP handler use.
+	if root, err := git.RepoRoot(cwd); err == nil {
+		cwd = root
+	}
 
 	cfg, err := config.Load()
 	if err != nil {
