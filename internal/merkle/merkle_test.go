@@ -217,6 +217,30 @@ func TestCollectFilePaths_SkipsLargeFiles(t *testing.T) {
 	}
 }
 
+func TestBuildTree_SkipsPermissionDeniedFile(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses file permission checks")
+	}
+	dir := t.TempDir()
+	writeFile(t, dir, "accessible.go", "package main\n")
+	writeFile(t, dir, "secret.go", "package main\n")
+	if err := os.Chmod(filepath.Join(dir, "secret.go"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(dir, "secret.go"), 0o644) })
+
+	tree, err := BuildTree(dir, nil)
+	if err != nil {
+		t.Fatalf("expected no error for permission-denied file, got: %v", err)
+	}
+	if _, ok := tree.Files["accessible.go"]; !ok {
+		t.Error("expected accessible.go in tree")
+	}
+	if _, ok := tree.Files["secret.go"]; ok {
+		t.Error("expected secret.go to be skipped")
+	}
+}
+
 func writeFile(t *testing.T, dir, rel, content string) {
 	t.Helper()
 	abs := filepath.Join(dir, rel)

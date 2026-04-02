@@ -934,6 +934,48 @@ func Nested() {}
 	}
 }
 
+func TestIndexer_SkipsPermissionDeniedFile(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses file permission checks")
+	}
+
+	dir := t.TempDir()
+	writeGoFile(t, dir, "ok.go", `package p
+
+func OK() {}
+`)
+	writeGoFile(t, dir, "secret.go", `package p
+
+func Secret() {}
+`)
+	if err := os.Chmod(filepath.Join(dir, "secret.go"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(dir, "secret.go"), 0o644) })
+
+	emb := &mockEmbedder{dims: 4, model: "test-model"}
+	idx, err := NewIndexer(":memory:", emb, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = idx.Close() }()
+
+	_, err = idx.Index(context.Background(), dir, false, nil)
+	if err != nil {
+		t.Fatalf("expected no error when a file is permission-denied, got: %v", err)
+	}
+
+	results, err := idx.Search(context.Background(), dir, []float32{0.1, 0.1, 0.1, 0.1}, 10, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range results {
+		if strings.Contains(r.FilePath, "secret.go") {
+			t.Errorf("secret.go should not be indexed, found: %s", r.FilePath)
+		}
+	}
+}
+
 func writeGoFile(t *testing.T, dir, name, content string) {
 	t.Helper()
 	path := filepath.Join(dir, name)

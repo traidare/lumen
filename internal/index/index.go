@@ -413,6 +413,12 @@ func (idx *Indexer) indexWithTree(ctx context.Context, projectDir, oldRootHash s
 		absPath := filepath.Join(projectDir, relPath)
 		content, err := os.ReadFile(absPath)
 		if err != nil {
+			if os.IsPermission(err) {
+				if idx.logger != nil {
+					idx.logger.Warn("skipping inaccessible file", "path", relPath, "error", err)
+				}
+				continue
+			}
 			return stats, fmt.Errorf("read file %s: %w", relPath, err)
 		}
 

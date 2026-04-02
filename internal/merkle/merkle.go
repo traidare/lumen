@@ -90,6 +90,12 @@ func collectFilePaths(rootDir string, skip SkipFunc) ([]string, error) {
 	var relPaths []string
 	err := filepath.WalkDir(rootDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			if os.IsPermission(err) {
+				if d != nil && d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
 			return err
 		}
 		rel, _ := filepath.Rel(rootDir, path)
@@ -142,6 +148,9 @@ func hashFilesInParallel(rootDir string, relPaths []string) (*Tree, error) {
 			for rel := range work {
 				data, err := os.ReadFile(filepath.Join(rootDir, rel))
 				if err != nil {
+					if os.IsPermission(err) {
+						continue
+					}
 					results <- result{err: err}
 					return
 				}
