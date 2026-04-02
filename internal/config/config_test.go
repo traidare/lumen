@@ -29,6 +29,102 @@ func TestEnvOrDefaultInt(t *testing.T) {
 	}
 }
 
+func TestLoad(t *testing.T) {
+	tests := []struct {
+		name        string
+		model       string
+		dims        string
+		ctx         string
+		wantDims    int
+		wantCtx     int
+		wantErr     bool
+	}{
+		{
+			name:     "known model no overrides",
+			model:    "ordis/jina-embeddings-v2-base-code",
+			wantDims: 768,
+			wantCtx:  8192,
+		},
+		{
+			name:     "unknown model with DIMS only",
+			model:    "custom-model",
+			dims:     "4096",
+			wantDims: 4096,
+			wantCtx:  8192,
+		},
+		{
+			name:     "unknown model with DIMS and CTX",
+			model:    "custom-model",
+			dims:     "4096",
+			ctx:      "40960",
+			wantDims: 4096,
+			wantCtx:  40960,
+		},
+		{
+			name:    "unknown model no DIMS",
+			model:   "custom-model",
+			wantErr: true,
+		},
+		{
+			name:    "unknown model CTX only no DIMS",
+			model:   "custom-model",
+			ctx:     "8192",
+			wantErr: true,
+		},
+		{
+			name:     "known model DIMS override",
+			model:    "ordis/jina-embeddings-v2-base-code",
+			dims:     "512",
+			wantDims: 512,
+			wantCtx:  8192,
+		},
+		{
+			name:     "known model CTX override",
+			model:    "ordis/jina-embeddings-v2-base-code",
+			ctx:      "16384",
+			wantDims: 768,
+			wantCtx:  16384,
+		},
+		{
+			name:     "known model both overrides",
+			model:    "ordis/jina-embeddings-v2-base-code",
+			dims:     "512",
+			ctx:      "4096",
+			wantDims: 512,
+			wantCtx:  4096,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("LUMEN_EMBED_MODEL", tc.model)
+			if tc.dims != "" {
+				t.Setenv("LUMEN_EMBED_DIMS", tc.dims)
+			}
+			if tc.ctx != "" {
+				t.Setenv("LUMEN_EMBED_CTX", tc.ctx)
+			}
+
+			cfg, err := Load()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.Dims != tc.wantDims {
+				t.Errorf("Dims: got %d, want %d", cfg.Dims, tc.wantDims)
+			}
+			if cfg.CtxLength != tc.wantCtx {
+				t.Errorf("CtxLength: got %d, want %d", cfg.CtxLength, tc.wantCtx)
+			}
+		})
+	}
+}
+
 func TestDBPathForProject(t *testing.T) {
 	t.Run("deterministic", func(t *testing.T) {
 		p1 := DBPathForProject("/home/user/project", "model-a")

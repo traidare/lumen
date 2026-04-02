@@ -182,13 +182,15 @@ for all 9 per-language benchmark deep dives.
 
 All configuration is via environment variables:
 
-| Variable                 | Default                  | Description                                |
-| ------------------------ | ------------------------ | ------------------------------------------ |
-| `LUMEN_EMBED_MODEL`      | see note ¹               | Embedding model (must be in registry)      |
-| `LUMEN_BACKEND`          | `ollama`                 | Embedding backend (`ollama` or `lmstudio`) |
-| `OLLAMA_HOST`            | `http://localhost:11434` | Ollama server URL                          |
-| `LM_STUDIO_HOST`         | `http://localhost:1234`  | LM Studio server URL                       |
-| `LUMEN_MAX_CHUNK_TOKENS` | `512`                    | Max tokens per chunk before splitting      |
+| Variable                 | Default                  | Description                                                   |
+| ------------------------ | ------------------------ | ------------------------------------------------------------- |
+| `LUMEN_EMBED_MODEL`      | see note ¹               | Embedding model; use with `LUMEN_EMBED_DIMS` for unlisted models |
+| `LUMEN_BACKEND`          | `ollama`                 | Embedding backend (`ollama` or `lmstudio`)                    |
+| `OLLAMA_HOST`            | `http://localhost:11434` | Ollama server URL                                             |
+| `LM_STUDIO_HOST`         | `http://localhost:1234`  | LM Studio server URL                                          |
+| `LUMEN_MAX_CHUNK_TOKENS` | `512`                    | Max tokens per chunk before splitting                         |
+| `LUMEN_EMBED_DIMS`       | —                        | Override embedding dimensions (required for unlisted models)  |
+| `LUMEN_EMBED_CTX`        | `8192` (unlisted models) | Override context window length                                |
 
 ¹ `ordis/jina-embeddings-v2-base-code` (Ollama),
 `nomic-ai/nomic-embed-code-GGUF` (LM Studio)
@@ -209,6 +211,22 @@ Dimensions and context length are configured automatically per model:
 
 Switching models creates a separate index automatically. The model name is part
 of the database path hash, so different models never collide.
+
+### Using a custom or unlisted model
+
+If your model is not in the registry above, set `LUMEN_EMBED_DIMS` to bypass the
+registry check. `LUMEN_EMBED_CTX` is optional and defaults to `8192`.
+
+Both variables can also override values for _known_ models — useful when running
+a model variant with a longer context window or different output dimensions.
+
+```sh
+LUMEN_BACKEND=lmstudio
+LM_STUDIO_HOST=http://localhost:8801
+LUMEN_EMBED_MODEL=mlx-community/Qwen3-Embedding-8B-4bit-DWQ
+LUMEN_EMBED_DIMS=4096
+LUMEN_EMBED_CTX=40960   # optional, defaults to 8192
+```
 
 ## Controlling what gets indexed
 
