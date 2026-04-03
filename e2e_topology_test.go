@@ -304,6 +304,10 @@ func AuthenticateUser() {}
 		},
 	}
 
+	// "ancestor-reuse" is tested separately below (TestE2E_AncestorReuse_MCP)
+	// because the two-call pattern with dynamic paths does not fit the
+	// pathTopologyCase struct cleanly.
+
 	// Subtests run sequentially: they share session and the server's per-path index state.
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -383,5 +387,109 @@ func AuthenticateUser() {}
 				}
 			}
 		})
+	}
+}
+
+// TestE2E_AncestorReuse_MCP verifies that an MCP search from a non-git
+// subdirectory reuses the parent directory's cached index instead of creating
+// a new one.
+func TestE2E_AncestorReuse_MCP(t *testing.T) {
+	t.Parallel()
+	session := startServer(t)
+
+	dir := makeCanonicalDir(t)
+	subDir := filepath.Join(dir, "sub")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Place a file in sub/ so the pathPrefix filter has something to return.
+	if err := os.WriteFile(filepath.Join(subDir, "util.go"), []byte(`package sub
+
+// SubHelper is a helper in the subdirectory.
+func SubHelper() {}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// First search indexes the root directory (including sub/).
+	out1 := callSearch(t, session, map[string]any{
+		"query":     "start server",
+		"path":      dir,
+		"n_results": 10,
+		"min_score": -1,
+	})
+	if !out1.Reindexed {
+		t.Error("first search: expected Reindexed=true")
+	}
+	if out1.IndexedFiles < 3 {
+		t.Errorf("first search: expected IndexedFiles >= 3, got %d", out1.IndexedFiles)
+	}
+	if findResult(out1.Results, "StartServer") == nil {
+		t.Errorf("first search: expected StartServer in results, got: %v", resultSymbols(out1.Results))
+	}
+
+	// Second search from sub/ should reuse the parent's index (no re-index).
+	out2 := callSearch(t, session, map[string]any{
+		"query":     "sub helper",
+		"path":      subDir,
+		"n_results": 10,
+		"min_score": -1,
+	})
+	if out2.Reindexed {
+		t.Error("sub/ search: expected Reindexed=false (parent index should be reused)")
+	}
+	if findResult(out2.Results, "SubHelper") == nil {
+		t.Errorf("sub/ search: expected SubHelper in results (from parent index), got: %v", resultSymbols(out2.Results))
+	}
+}
+
+// TestE2E_AncestorReuse_SkipDir verifies that ancestor walking does NOT cross
+// skip directories (node_modules, testdata, etc.). A search from inside
+// node_modules/ must create its own index, not reuse the parent's.
+func TestE2E_AncestorReuse_SkipDir(t *testing.T) {
+	t.Parallel()
+	session := startServer(t)
+
+	dir := makeCanonicalDir(t)
+
+	// Add a Go file inside node_modules (a skip dir).
+	nmDir := filepath.Join(dir, "node_modules", "somepkg")
+	if err := os.MkdirAll(nmDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nmDir, "index.go"), []byte(`package somepkg
+
+// NpmHelper is a helper function in node_modules.
+func NpmHelper() {}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Index the root directory first.
+	out1 := callSearch(t, session, map[string]any{
+		"query":     "start server",
+		"path":      dir,
+		"n_results": 10,
+		"min_score": -1,
+	})
+	if !out1.Reindexed {
+		t.Error("root search: expected Reindexed=true")
+	}
+
+	// Search from inside node_modules — must NOT reuse parent index.
+	out2 := callSearch(t, session, map[string]any{
+		"query":     "npm helper",
+		"path":      nmDir,
+		"n_results": 10,
+		"min_score": -1,
+	})
+	if !out2.Reindexed {
+		t.Error("node_modules search: expected Reindexed=true (should NOT reuse parent)")
+	}
+	if findResult(out2.Results, "NpmHelper") == nil {
+		t.Errorf("node_modules search: expected NpmHelper in results, got: %v", resultSymbols(out2.Results))
+	}
+	if findResult(out2.Results, "StartServer") != nil {
+		t.Errorf("node_modules search: unexpected StartServer (parent index should NOT be reused): %v", resultSymbols(out2.Results))
 	}
 }

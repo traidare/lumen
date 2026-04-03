@@ -1,0 +1,110 @@
+// Copyright 2026 Aeneas Rekkas
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package cmd
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/ory/lumen/internal/config"
+)
+
+func TestFindAncestorIndex(t *testing.T) {
+	const model = "test-model"
+
+	t.Run("returns empty when no ancestor has an index", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("XDG_DATA_HOME", tmpDir)
+
+		got := findAncestorIndex("/some/deep/nonexistent/path", model)
+		if got != "" {
+			t.Fatalf("expected empty string, got %q", got)
+		}
+	})
+
+	t.Run("finds parent with existing DB on disk", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("XDG_DATA_HOME", tmpDir)
+
+		// Create a fake DB for /project.
+		parentDBPath := config.DBPathForProject("/project", model)
+		if err := os.MkdirAll(filepath.Dir(parentDBPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(parentDBPath, []byte{}, 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		got := findAncestorIndex("/project/scripts/util", model)
+		if got != "/project" {
+			t.Fatalf("expected /project, got %q", got)
+		}
+	})
+
+	t.Run("skips ancestor when path crosses a SkipDir", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("XDG_DATA_HOME", tmpDir)
+
+		// Create a fake DB for /project.
+		parentDBPath := config.DBPathForProject("/project", model)
+		if err := os.MkdirAll(filepath.Dir(parentDBPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(parentDBPath, []byte{}, 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		// "testdata" is in merkle.SkipDirs — the parent index would never
+		// contain these files, so findAncestorIndex must return "".
+		got := findAncestorIndex("/project/testdata/fixtures/go", model)
+		if got != "" {
+			t.Fatalf("expected empty string (skip dir in route), got %q", got)
+		}
+	})
+
+	t.Run("stops at filesystem root without panicking", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("XDG_DATA_HOME", tmpDir)
+
+		// No DBs exist anywhere — should return "" without panic.
+		got := findAncestorIndex("/a/b/c/d/e", model)
+		if got != "" {
+			t.Fatalf("expected empty string, got %q", got)
+		}
+	})
+
+	t.Run("returns nearest ancestor when multiple exist", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("XDG_DATA_HOME", tmpDir)
+
+		// Create fake DBs for both /project and /project/src.
+		for _, dir := range []string{"/project", "/project/src"} {
+			dbPath := config.DBPathForProject(dir, model)
+			if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(dbPath, []byte{}, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		// Searching from /project/src/pkg should find /project/src (nearest).
+		got := findAncestorIndex("/project/src/pkg", model)
+		if got != "/project/src" {
+			t.Fatalf("expected /project/src (nearest ancestor), got %q", got)
+		}
+	})
+}

@@ -360,6 +360,50 @@ func TestGenerateSessionContextInternal_NormalizesToGitRoot(t *testing.T) {
 	}
 }
 
+func TestGenerateSessionContextInternal_NonGitUsesParentIndex(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", tmpDir)
+
+	// Create a non-git directory hierarchy.
+	parentDir := filepath.Join(tmpDir, "parent")
+	deepDir := filepath.Join(parentDir, "child", "deep")
+	if err := os.MkdirAll(deepDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Resolve symlinks to match what filepath.Abs would produce on macOS.
+	resolvedParent, err := filepath.EvalSymlinks(parentDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a DB for the parent directory.
+	cfg, cfgErr := config.Load()
+	if cfgErr != nil {
+		t.Fatalf("config.Load: %v", cfgErr)
+	}
+	dbPath := config.DBPathForProject(resolvedParent, cfg.Model)
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeHookTestDB(t, dbPath, time.Now().Add(-30*time.Second))
+
+	// Pass a deep subdirectory as cwd — the hook should walk up and find
+	// the parent's index.
+	resolvedDeep, err := filepath.EvalSymlinks(deepDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := generateSessionContextInternal("lumen", resolvedDeep,
+		func(_, _ string) string { return "" },
+		func(_ string) {},
+	)
+
+	if !strings.Contains(result, "index ready") {
+		t.Errorf("expected hook to walk up to parent index and find it, got: %s", result)
+	}
+}
+
 func TestHookOutputJSON(t *testing.T) {
 	// Use the internal version with a no-op bgIndexer — same fork-bomb reason
 	// as in TestGenerateSessionContext_NoIndex.

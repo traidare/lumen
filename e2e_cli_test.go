@@ -546,3 +546,132 @@ func TestE2E_CLI_SQLVerifyIncremental(t *testing.T) {
 		t.Errorf("found %d orphan chunks after file deletion", orphans)
 	}
 }
+
+// TestE2E_CLI_AncestorReuse_Index verifies that `lumen index` from a non-git
+// subdirectory reuses the parent's existing on-disk index via findAncestorIndex.
+func TestE2E_CLI_AncestorReuse_Index(t *testing.T) {
+	t.Parallel()
+	dataHome := t.TempDir()
+
+	// Copy sample-project to a plain (non-git) temp dir.
+	dir := t.TempDir()
+	copyDir(t, sampleProjectPath(t), dir)
+	subDir := filepath.Join(dir, "sub")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Index the parent directory.
+	_, _, err := runCLIWithDataHome(t, dataHome, "index", dir)
+	if err != nil {
+		t.Fatalf("first index failed: %v", err)
+	}
+
+	// Index from sub/ — should find ancestor's DB and report up-to-date.
+	stdout, _, err := runCLIWithDataHome(t, dataHome, "index", subDir)
+	if err != nil {
+		t.Fatalf("sub index failed: %v", err)
+	}
+	if !strings.Contains(stdout, "up to date") {
+		t.Errorf("expected 'up to date' from ancestor reuse, got stdout: %s", stdout)
+	}
+}
+
+// TestE2E_CLI_AncestorReuse_Search verifies that `lumen search` from a non-git
+// subdirectory reuses the parent's on-disk index for search results.
+// Uses --cwd to set the index root explicitly, while -p scopes the search.
+func TestE2E_CLI_AncestorReuse_Search(t *testing.T) {
+	t.Parallel()
+	dataHome := t.TempDir()
+
+	// Copy sample-project to a plain (non-git) temp dir.
+	dir := t.TempDir()
+	copyDir(t, sampleProjectPath(t), dir)
+	subDir := filepath.Join(dir, "sub")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed the parent index.
+	_, _, err := runCLIWithDataHome(t, dataHome, "index", dir)
+	if err != nil {
+		t.Fatalf("index failed: %v", err)
+	}
+
+	// Search with --cwd pointing at sub/ (triggers ancestor resolution for
+	// indexRoot) and -p pointing at dir (full scope, no pathPrefix filtering).
+	stdout, _, err := runCLIWithDataHome(t, dataHome, "search", "--cwd", subDir, "-p", dir, "token validation")
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	if !strings.Contains(stdout, "ValidateToken") {
+		t.Errorf("expected ValidateToken in search results from ancestor index, got stdout: %s", stdout)
+	}
+}
+
+// TestE2E_CLI_AncestorReuse_NearestWins verifies that when multiple ancestor
+// directories have indexes, the nearest one is used.
+func TestE2E_CLI_AncestorReuse_NearestWins(t *testing.T) {
+	t.Parallel()
+	dataHome := t.TempDir()
+
+	// Create grandparent with canonical files.
+	grandparent := t.TempDir()
+	pkgDir := filepath.Join(grandparent, "pkg")
+	apiDir := filepath.Join(grandparent, "api")
+	for _, d := range []string{pkgDir, apiDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "server.go"), []byte(`package pkg
+
+// StartServer starts the main server loop.
+func StartServer() {}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(apiDir, "handler.go"), []byte(`package api
+
+// HandleLogin processes login requests.
+func HandleLogin() {}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create parent with a different file.
+	parent := filepath.Join(grandparent, "parent")
+	libDir := filepath.Join(parent, "lib")
+	childDir := filepath.Join(parent, "child")
+	for _, d := range []string{libDir, childDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(libDir, "worker.go"), []byte(`package lib
+
+// RunWorker executes the background worker.
+func RunWorker() {}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Index both levels.
+	if _, _, err := runCLIWithDataHome(t, dataHome, "index", grandparent); err != nil {
+		t.Fatalf("grandparent index failed: %v", err)
+	}
+	if _, _, err := runCLIWithDataHome(t, dataHome, "index", parent); err != nil {
+		t.Fatalf("parent index failed: %v", err)
+	}
+
+	// Search from child/ — nearest ancestor is parent/, which has RunWorker.
+	// Use --cwd child/ so indexRoot resolves to parent/ via ancestor walking,
+	// and -p parent/ for full scope (no pathPrefix filtering).
+	stdout, _, err := runCLIWithDataHome(t, dataHome, "search", "--cwd", childDir, "-p", parent, "run worker")
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	if !strings.Contains(stdout, `symbol="RunWorker"`) {
+		t.Errorf("expected RunWorker from nearest ancestor (parent), got stdout: %s", stdout)
+	}
+}

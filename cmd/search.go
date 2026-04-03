@@ -26,6 +26,7 @@ import (
 
 	"github.com/ory/lumen/internal/config"
 	"github.com/ory/lumen/internal/embedder"
+	"github.com/ory/lumen/internal/git"
 	"github.com/ory/lumen/internal/index"
 	"github.com/spf13/cobra"
 )
@@ -146,6 +147,13 @@ func runSearch(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("resolve cwd: %w", err)
 		}
 		indexRoot = abs
+	}
+
+	// Normalize to git root, or fall back to ancestor index for non-git dirs.
+	if root, err := git.RepoRoot(indexRoot); err == nil {
+		indexRoot = root
+	} else if ancestor := findAncestorIndex(indexRoot, cfg.Model); ancestor != "" {
+		indexRoot = ancestor
 	}
 
 	tr.record("path resolution", indexRoot)

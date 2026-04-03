@@ -116,15 +116,18 @@ func generateSessionContextInternal(mcpName, cwd string, findDonor func(string, 
 	toolRef := "mcp__" + mcpName + "__semantic_search"
 	directive := "Call " + toolRef + " first for any code discovery task — before Grep, Bash, or Read."
 
-	// Normalize cwd to the git repository root so the DB path matches what
-	// `lumen index` and the MCP handler use.
-	if root, err := git.RepoRoot(cwd); err == nil {
-		cwd = root
-	}
-
 	cfg, err := config.Load()
 	if err != nil {
 		return directive + " No index yet — auto-created on first call."
+	}
+
+	// Normalize cwd to the git repository root so the DB path matches what
+	// `lumen index` and the MCP handler use. For non-git directories, walk
+	// up to reuse an existing ancestor index.
+	if root, err := git.RepoRoot(cwd); err == nil {
+		cwd = root
+	} else if ancestor := findAncestorIndex(cwd, cfg.Model); ancestor != "" {
+		cwd = ancestor
 	}
 
 	dbPath := config.DBPathForProject(cwd, cfg.Model)

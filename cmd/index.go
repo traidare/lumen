@@ -68,8 +68,11 @@ func runIndex(cmd *cobra.Command, args []string) error {
 
 	// Normalize to the git repository root when inside a git repo so that
 	// indexing a subdirectory produces the same DB as indexing the repo root.
+	// For non-git directories, walk up to reuse an existing ancestor index.
 	if root, err := git.RepoRoot(projectPath); err == nil {
 		projectPath = root
+	} else if ancestor := findAncestorIndex(projectPath, cfg.Model); ancestor != "" {
+		projectPath = ancestor
 	}
 
 	// When the project directory is not a git repo, discover nested git repos
