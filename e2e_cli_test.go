@@ -35,6 +35,12 @@ import (
 func gitSampleProject(t *testing.T) string {
 	t.Helper()
 	tmp := t.TempDir()
+	// Resolve symlinks so the path matches what the CLI computes via
+	// git rev-parse --show-toplevel + filepath.EvalSymlinks (e.g. on macOS
+	// /tmp → /private/tmp).
+	if resolved, err := filepath.EvalSymlinks(tmp); err == nil {
+		tmp = resolved
+	}
 	copyDir(t, sampleProjectPath(t), tmp)
 	for _, args := range [][]string{
 		{"init"},
@@ -603,6 +609,9 @@ func TestE2E_CLI_AncestorReuse_Search(t *testing.T) {
 	stdout, _, err := runCLIWithDataHome(t, dataHome, "search", "--cwd", subDir, "-p", dir, "token validation")
 	if err != nil {
 		t.Fatalf("search failed: %v", err)
+	}
+	if !strings.Contains(stdout, `symbol=`) {
+		t.Fatalf("expected at least one result from ancestor index, got stdout: %s", stdout)
 	}
 	if !strings.Contains(stdout, "ValidateToken") {
 		t.Errorf("expected ValidateToken in search results from ancestor index, got stdout: %s", stdout)

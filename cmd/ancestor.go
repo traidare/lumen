@@ -21,13 +21,16 @@ import (
 	"github.com/ory/lumen/internal/config"
 )
 
-// findAncestorIndex walks up from filepath.Dir(path) checking whether any
-// ancestor directory has an existing lumen index DB on disk. Returns the
-// ancestor path if found, or "" if none exists.
+// findAncestorIndex walks up from path's parent directory, checking whether
+// any ancestor has an existing lumen index DB on disk. Returns the ancestor
+// path if found, or "" if none exists.
 //
 // This is the CLI equivalent of indexerCache.findEffectiveRoot for one-shot
 // commands (index, search, hook) that don't maintain an in-memory cache.
 // Only use for non-git directories; callers should try git.RepoRoot first.
+//
+// Unlike findEffectiveRoot (MCP), this does not cap the walk at the git root
+// because callers have already confirmed path is not inside a git repo.
 func findAncestorIndex(path, model string) string {
 	candidate := filepath.Dir(path)
 	for {
