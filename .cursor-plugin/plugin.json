@@ -1,0 +1,24 @@
+{
+  "name": "lumen",
+  "displayName": "Lumen",
+  "description": "Precise local semantic code search via MCP. Indexes your codebase with Go AST parsing, embeds with Ollama or LM Studio, and exposes semantic search directly in Cursor.",
+  "version": "0.0.29",
+  "author": {
+    "name": "Ory Corp",
+    "url": "https://github.com/ory"
+  },
+  "homepage": "https://github.com/ory/lumen",
+  "repository": "https://github.com/ory/lumen",
+  "license": "Apache-2.0",
+  "keywords": [
+    "semantic-search",
+    "code-index",
+    "mcp",
+    "cursor",
+    "ollama",
+    "rag"
+  ],
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks-cursor.json",
+  "mcpServers": "./.cursor/mcp.json"
+}

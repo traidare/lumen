@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "lumen": {
+      "command": "${CURSOR_PLUGIN_ROOT}/scripts/run.cmd",
+      "args": [
+        "stdio"
+      ]
+    }
+  }
+}

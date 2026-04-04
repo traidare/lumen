@@ -5,8 +5,18 @@ Claude Code plugin system. It provides fast, semantic search capabilities over
 codebases by leveraging vector embeddings and a Merkle tree structure to
 efficiently detect changes and minimize re-indexing.
 
-This repository is structured as a claude plugin available via the claude
-marketplace.
+This repository keeps all agent integration surfaces at the repo root:
+
+- Claude Code plugin files under `.claude-plugin/`
+- Codex install docs under `.codex/`
+- Cursor plugin files under `.cursor-plugin/`
+- OpenCode plugin files under `.opencode/`
+- Shared hooks, skills, MCP wiring, and launchers under `hooks/`, `skills/`,
+  `mcp.json`, and `scripts/`
+
+Do not add a repo-root `.mcp.json` or repo-root `.codex-plugin/`. Claude Code
+reads repo-root `.mcp.json` as project-scoped MCP config, which would change
+runtime behavior for this repository outside the Claude plugin install path.
 
 ## Go Standards
 
@@ -107,6 +117,10 @@ system handles MCP registration, hooks, and skills declaratively via:
 - `hooks/hooks.json` — SessionStart + PreToolUse hooks
 - `skills/` — `/lumen:doctor` and `/lumen:reindex` skills
 
+Codex, Cursor, and OpenCode reuse the same repo-root `skills/`, `hooks/`, and
+`scripts/` surfaces. Their install-specific entrypoints live in `.codex/`,
+`.cursor-plugin/`, `.opencode/`, and `mcp.json`.
+
 ## Environment Variables
 
 | Variable                 | Default                  | Description                                |
@@ -125,10 +139,15 @@ system handles MCP registration, hooks, and skills declaratively via:
 ```
 .
 ├── main.go              # 3-line entrypoint
-├── .claude-plugin/      # Plugin manifest
-├── hooks/               # Hook declarations
-├── skills/              # Skill definitions
-├── scripts/             # Platform wrappers (run.sh, run.bat)
+├── .claude-plugin/      # Claude Code plugin manifest
+├── .codex/             # Codex installation docs
+├── .cursor-plugin/     # Cursor plugin manifest
+├── .opencode/          # OpenCode install docs and plugin entrypoint
+├── hooks/              # Claude + Cursor hook declarations
+├── skills/             # Shared skill definitions
+├── mcp.json            # Cursor MCP wiring
+├── package.json        # @ory/lumen-opencode npm package metadata
+├── scripts/            # Shared launchers and platform wrappers
 ├── cmd/
 │   ├── root.go         # Cobra root command
 │   ├── stdio.go        # MCP server
@@ -182,8 +201,10 @@ because slog writes to the log file while tui writes to the process stderr.
   `LUMEN_MAX_CHUNK_TOKENS` (512 default)
 - **32-batch embedding**: Balance memory vs. API round-trips
 - **Cosine distance KNN**: Normalized for semantic similarity
-- **Plugin system**: Declarative hooks/MCP/skills via `.claude-plugin/`,
-  replacing manual install/uninstall
+- **Plugin system**: Declarative Claude and Cursor packaging at the repo root,
+  plus Codex/OpenCode install surfaces that reuse the same skills and launcher
+- **No repo-root `.mcp.json`**: Use `mcp.json` for Cursor and `.codex/INSTALL.md`
+  for Codex so Claude project behavior never changes implicitly
 
 ## Claude Integration Notes
 

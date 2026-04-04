@@ -863,5 +863,5 @@ Expected: all PASS, no flakes.
 ```bash
 git add -A
 git commit -m "feat: multi-language semantic code indexing via tree-sitter"
-git push origin initial-implementation
+git push origin main
 ```

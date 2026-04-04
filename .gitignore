@@ -16,6 +16,9 @@ dist/
 .worktrees/
 
 lumen
+!plugins/
+!plugins/lumen/
+!plugins/lumen/**
 
 bench-swe/bench-swe
 bench-swe/overview.txt

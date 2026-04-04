@@ -77,6 +77,21 @@ func TestGenerateSessionContext_NoIndex(t *testing.T) {
 	}
 }
 
+func TestGenerateSessionContextForCursor_NoIndex(t *testing.T) {
+	content := generateSessionContextInternalWithDirective(
+		sessionStartDirective(hookHostCursor, "lumen"),
+		"/nonexistent/path",
+		func(_, _ string) string { return "" },
+		func(_ string) {},
+	)
+	if strings.Contains(content, "mcp__lumen__semantic_search") {
+		t.Error("cursor content should not use Claude-style MCP tool ids")
+	}
+	if !strings.Contains(content, "Lumen semantic_search tool") {
+		t.Error("cursor content should reference the generic Lumen semantic_search tool")
+	}
+}
+
 func TestEvaluateToolCall_GrepAlwaysSuggests(t *testing.T) {
 	cases := []string{
 		"error handling middleware",
@@ -278,7 +293,6 @@ func TestGenerateSessionContextInternal_SpawnsWhenStale(t *testing.T) {
 	}
 }
 
-
 func TestGenerateSessionContextInternal_MessageWithDonor(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", tmpDir)
@@ -438,6 +452,33 @@ func TestHookOutputJSON(t *testing.T) {
 	ctx, ok := hso["additionalContext"].(string)
 	if !ok || !strings.Contains(ctx, "mcp__lumen__semantic_search") {
 		t.Error("additionalContext should contain tool reference")
+	}
+}
+
+func TestSessionStartOutputCursorJSON(t *testing.T) {
+	content := generateSessionContextInternalWithDirective(
+		sessionStartDirective(hookHostCursor, "lumen"),
+		"/nonexistent/path",
+		func(_, _ string) string { return "" },
+		func(_ string) {},
+	)
+
+	data, err := json.Marshal(sessionStartOutput(hookHostCursor, content))
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+
+	if _, exists := parsed["hookSpecificOutput"]; exists {
+		t.Fatal("cursor output should not use Claude hookSpecificOutput payloads")
+	}
+	ctx, ok := parsed["additional_context"].(string)
+	if !ok || !strings.Contains(ctx, "Lumen semantic_search tool") {
+		t.Error("additional_context should contain the generic Lumen semantic_search tool reference")
 	}
 }
 

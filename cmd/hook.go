@@ -34,6 +34,11 @@ import (
 // from triggering a full merkle walk when the index was just updated.
 const backgroundIndexStaleness = 5 * time.Minute
 
+const (
+	hookHostClaude = "claude"
+	hookHostCursor = "cursor"
+)
+
 // NOTE: Hooks are now declared in hooks/hooks.json (plugin system).
 // The hook subcommands remain as the execution targets for those declarations.
 
@@ -41,6 +46,8 @@ func init() {
 	rootCmd.AddCommand(hookCmd)
 	hookCmd.AddCommand(hookSessionStartCmd)
 	hookCmd.AddCommand(hookPreToolUseCmd)
+
+	hookSessionStartCmd.Flags().StringVar(&hookSessionStartHost, "host", hookHostClaude, "Hook host output format")
 }
 
 var hookCmd = &cobra.Command{
@@ -48,9 +55,11 @@ var hookCmd = &cobra.Command{
 	Short: "Hook handlers for AI coding agent integration",
 }
 
+var hookSessionStartHost string
+
 var hookSessionStartCmd = &cobra.Command{
 	Use:   "session-start [mcp-name]",
-	Short: "Output SessionStart hook JSON for Claude Code",
+	Short: "Output SessionStart hook JSON for Claude Code or Cursor",
 	Args:  cobra.MaximumNArgs(1),
 	RunE:  runHookSessionStart,
 }
@@ -67,7 +76,11 @@ type hookSpecificOutput struct {
 	PermissionDecisionReason string `json:"permissionDecisionReason,omitempty"`
 }
 
-// sessionStartInput is the JSON structure Claude Code sends to SessionStart hooks.
+type cursorHookOutput struct {
+	AdditionalContext string `json:"additional_context"`
+}
+
+// sessionStartInput is the subset of SessionStart hook input used across hosts.
 type sessionStartInput struct {
 	CWD string `json:"cwd"`
 }
@@ -78,6 +91,11 @@ func runHookSessionStart(_ *cobra.Command, args []string) error {
 		mcpName = args[0]
 	}
 
+	host, err := normalizeHookHost(hookSessionStartHost)
+	if err != nil {
+		return err
+	}
+
 	var input sessionStartInput
 	_ = json.NewDecoder(os.Stdin).Decode(&input)
 
@@ -86,36 +104,27 @@ func runHookSessionStart(_ *cobra.Command, args []string) error {
 		cwd, _ = os.Getwd()
 	}
 
-	content := generateSessionContext(mcpName, cwd)
-
-	out := hookOutput{
-		HookSpecificOutput: hookSpecificOutput{
-			HookEventName:     "SessionStart",
-			AdditionalContext: content,
-		},
-	}
+	content := generateSessionContextForHost(host, mcpName, cwd)
+	out := sessionStartOutput(host, content)
 
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetEscapeHTML(false)
 	return enc.Encode(out)
 }
 
-// generateSessionContext builds concise context for the SessionStart hook.
-// If an index exists, it includes stats and top symbols to create a natural
-// data dependency — Claude sees useful data and wants more from the tool.
-// When no index exists, it triggers background pre-warming so the first search
-// in the session is fast.
-func generateSessionContext(mcpName, cwd string) string {
-	return generateSessionContextInternal(mcpName, cwd, config.FindDonorIndex, spawnBackgroundIndexer)
+func generateSessionContextForHost(host, mcpName, cwd string) string {
+	return generateSessionContextInternalWithDirective(sessionStartDirective(host, mcpName), cwd, config.FindDonorIndex, spawnBackgroundIndexer)
 }
 
-// generateSessionContextInternal is the testable core of generateSessionContext.
-// findDonor and bgIndexer are injected so tests can verify behaviour without
-// spawning real processes or requiring a live git repository.
-func generateSessionContextInternal(mcpName, cwd string, findDonor func(string, string) string, bgIndexer func(string)) string {
+func sessionStartDirective(host, mcpName string) string {
+	if host == hookHostCursor {
+		return "Use the Lumen semantic_search tool first for any code discovery task — before Grep, Bash, or Read."
+	}
 	toolRef := "mcp__" + mcpName + "__semantic_search"
-	directive := "Call " + toolRef + " first for any code discovery task — before Grep, Bash, or Read."
+	return "Call " + toolRef + " first for any code discovery task — before Grep, Bash, or Read."
+}
 
+func generateSessionContextInternalWithDirective(directive, cwd string, findDonor func(string, string) string, bgIndexer func(string)) string {
 	cfg, err := config.Load()
 	if err != nil {
 		return directive + " No index yet — auto-created on first call."
@@ -172,6 +181,36 @@ func generateSessionContextInternal(mcpName, cwd string, findDonor func(string, 
 	}
 	sb.WriteString(" " + directive)
 	return sb.String()
+}
+
+// generateSessionContextInternal is the testable core of generateSessionContext.
+// findDonor and bgIndexer are injected so tests can verify behaviour without
+// spawning real processes or requiring a live git repository.
+func generateSessionContextInternal(mcpName, cwd string, findDonor func(string, string) string, bgIndexer func(string)) string {
+	return generateSessionContextInternalWithDirective(sessionStartDirective(hookHostClaude, mcpName), cwd, findDonor, bgIndexer)
+}
+
+func normalizeHookHost(host string) (string, error) {
+	switch strings.ToLower(host) {
+	case "", hookHostClaude:
+		return hookHostClaude, nil
+	case hookHostCursor:
+		return hookHostCursor, nil
+	default:
+		return "", fmt.Errorf("unsupported hook host %q", host)
+	}
+}
+
+func sessionStartOutput(host, content string) any {
+	if host == hookHostCursor {
+		return cursorHookOutput{AdditionalContext: content}
+	}
+	return hookOutput{
+		HookSpecificOutput: hookSpecificOutput{
+			HookEventName:     "SessionStart",
+			AdditionalContext: content,
+		},
+	}
 }
 
 // --- PreToolUse hook ---

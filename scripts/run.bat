@@ -1,10 +1,12 @@
 @echo off
 setlocal enabledelayedexpansion
 
-:: Determine plugin root: prefer env var set by Claude Code plugin system,
-:: fall back to deriving from script location.
+:: Determine plugin root: prefer an agent-set env var, then fall back to the
+:: repository layout so the same launcher works across supported hosts.
 if defined CLAUDE_PLUGIN_ROOT (
   set "PLUGIN_ROOT=%CLAUDE_PLUGIN_ROOT%"
+) else if defined CURSOR_PLUGIN_ROOT (
+  set "PLUGIN_ROOT=%CURSOR_PLUGIN_ROOT%"
 ) else (
   set "PLUGIN_ROOT=%~dp0.."
 )

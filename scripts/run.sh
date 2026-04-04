@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Determine plugin root: prefer env var set by Claude Code plugin system,
-# fall back to deriving from script location (local dev / direct invocation).
-PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+# Determine plugin root: prefer an agent-set env var, then fall back to the
+# repository layout so the same launcher works for Claude, Codex, Cursor,
+# OpenCode, and direct local invocation.
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}}"
 
 # Platform detection
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
