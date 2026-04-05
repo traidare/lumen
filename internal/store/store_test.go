@@ -15,6 +15,7 @@
 package store
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
@@ -87,7 +88,7 @@ func TestStore_UpsertAndSearchVectors(t *testing.T) {
 	}
 
 	query := []float32{0.1, 0.2, 0.3, 0.4}
-	results, err := s.Search(query, 2, 0, "")
+	results, err := s.Search(context.Background(), query, 2, 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +122,7 @@ func TestStore_DeleteFileChunks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.Search([]float32{0.1, 0.2, 0.3, 0.4}, 10, 0, "")
+	results, err := s.Search(context.Background(), []float32{0.1, 0.2, 0.3, 0.4}, 10, 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,7 +302,7 @@ func TestStore_DimensionMismatchRecreatesTable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s2.Search([]float32{0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8}, 10, 0, "")
+	results, err := s2.Search(context.Background(), []float32{0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8}, 10, 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +339,7 @@ func TestStore_SearchWithPathPrefix(t *testing.T) {
 	}
 
 	// Without prefix: both results returned.
-	all, err := s.Search(vec, 10, 0, "")
+	all, err := s.Search(context.Background(), vec, 10, 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -347,7 +348,7 @@ func TestStore_SearchWithPathPrefix(t *testing.T) {
 	}
 
 	// With prefix "src": only src/main.go result.
-	srcResults, err := s.Search(vec, 10, 0, "src")
+	srcResults, err := s.Search(context.Background(), vec, 10, 0, "src")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +360,7 @@ func TestStore_SearchWithPathPrefix(t *testing.T) {
 	}
 
 	// With prefix "tests": only tests/foo_test.go result.
-	testResults, err := s.Search(vec, 10, 0, "tests")
+	testResults, err := s.Search(context.Background(), vec, 10, 0, "tests")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -433,7 +434,7 @@ func TestResetAndRecreateVecTable_Transactional(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	results, err := s2.Search([]float32{0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8}, 10, 0, "")
+	results, err := s2.Search(context.Background(), []float32{0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8}, 10, 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -465,7 +466,7 @@ func TestStore_SearchPathPrefixNoFalsePositives(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.Search(vec, 10, 0, "internal/store")
+	results, err := s.Search(context.Background(), vec, 10, 0, "internal/store")
 	if err != nil {
 		t.Fatal(err)
 	}

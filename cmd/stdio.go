@@ -53,13 +53,13 @@ var stdioCmd = &cobra.Command{
 
 // SemanticSearchInput defines the parameters for the semantic_search tool.
 type SemanticSearchInput struct {
-	Query        string   `json:"query" jsonschema:"Natural language search query"`
-	Path         string   `json:"path,omitempty" jsonschema:"Absolute path to search in. Defaults to cwd. When a subdirectory of cwd, results are filtered to that subtree."`
-	Cwd          string   `json:"cwd,omitempty" jsonschema:"The current working directory / project root. Used as index root when provided."`
-	NResults     int      `json:"n_results,omitempty" jsonschema:"Max results to return, default 8"`
-	MinScore     *float64 `json:"min_score,omitempty" jsonschema:"Minimum score threshold (-1 to 1). Results below this score are excluded. Default depends on embedding model. Use -1 to return all results."`
-	Summary      bool     `json:"summary,omitempty" jsonschema:"When true, return only file path, symbol, kind, line range, and score — no code content. Useful for location-only queries."`
-	MaxLines     int      `json:"max_lines,omitempty" jsonschema:"Truncate each code snippet to this many lines. Default: unlimited."`
+	Query    string   `json:"query" jsonschema:"Natural language search query"`
+	Path     string   `json:"path,omitempty" jsonschema:"Absolute path to search in. Defaults to cwd. When a subdirectory of cwd, results are filtered to that subtree."`
+	Cwd      string   `json:"cwd,omitempty" jsonschema:"The current working directory / project root. Used as index root when provided."`
+	NResults int      `json:"n_results,omitempty" jsonschema:"Max results to return, default 8"`
+	MinScore *float64 `json:"min_score,omitempty" jsonschema:"Minimum score threshold (-1 to 1). Results below this score are excluded. Default depends on embedding model. Use -1 to return all results."`
+	Summary  bool     `json:"summary,omitempty" jsonschema:"When true, return only file path, symbol, kind, line range, and score — no code content. Useful for location-only queries."`
+	MaxLines int      `json:"max_lines,omitempty" jsonschema:"Truncate each code snippet to this many lines. Default: unlimited."`
 }
 
 // SearchResultItem represents a single search result returned to the caller.
@@ -120,7 +120,7 @@ type HealthCheckOutput struct {
 // adds 1-3s of pure filesystem I/O even when nothing has changed.
 // Override with LUMEN_FRESHNESS_TTL (e.g. "1s", "30s") for testing.
 const defaultFreshnessTTL = 30 * time.Second
-const reindexTimeout = 15 * time.Second
+const defaultReindexTimeout = 15 * time.Second
 const backgroundReindexMaxDuration = 10 * time.Minute
 
 type cacheEntry struct {
@@ -132,17 +132,18 @@ type cacheEntry struct {
 // indexerCache manages one *index.Indexer per project path, creating them
 // lazily with a shared embedder.
 type indexerCache struct {
-	mu            sync.RWMutex
-	cache         map[string]cacheEntry
-	embedder      embedder.Embedder
-	model         string
-	cfg           config.Config
-	freshnessTTL  time.Duration              // 0 means use defaultFreshnessTTL
-	findDonorFunc   func(string, string) string // nil uses config.FindDonorIndex
-	seedFunc        func(string, string) (bool, error) // nil uses index.SeedFromDonor
+	mu              sync.RWMutex
+	cache           map[string]cacheEntry
+	embedder        embedder.Embedder
+	model           string
+	cfg             config.Config
+	freshnessTTL    time.Duration                                                                                                            // 0 means use defaultFreshnessTTL
+	reindexTimeout  time.Duration                                                                                                            // 0 means use defaultReindexTimeout
+	findDonorFunc   func(string, string) string                                                                                              // nil uses config.FindDonorIndex
+	seedFunc        func(string, string) (bool, error)                                                                                       // nil uses index.SeedFromDonor
 	ensureFreshFunc func(ctx context.Context, idx *index.Indexer, projectDir string, progress index.ProgressFunc) (bool, index.Stats, error) // nil uses idx.EnsureFresh
 	log             *slog.Logger
-	wg            sync.WaitGroup // tracks background reindex goroutines
+	wg              sync.WaitGroup // tracks background reindex goroutines
 }
 
 // logger returns ic.log, falling back to a discarding logger when the field
@@ -459,7 +460,19 @@ func (ic *indexerCache) handleSemanticSearch(ctx context.Context, req *mcp.CallT
 	// Over-fetch from KNN so that merging overlapping split chunks doesn't
 	// reduce the final result count below the requested limit.
 	fetchLimit := input.NResults * 2
-	results, err := idx.Search(ctx, effectiveRoot, queryVec, fetchLimit, maxDistance, pathPrefix)
+
+	// Defense-in-depth: bound the search call so that even if a future
+	// regression reintroduces mutex contention, we return within a
+	// predictable time rather than hanging indefinitely.
+	searchTimeout := ic.reindexTimeout
+	if searchTimeout == 0 {
+		searchTimeout = defaultReindexTimeout
+	}
+	searchTimeout += 5 * time.Second
+	searchCtx, searchCancel := context.WithTimeout(ctx, searchTimeout)
+	defer searchCancel()
+
+	results, err := idx.Search(searchCtx, effectiveRoot, queryVec, fetchLimit, maxDistance, pathPrefix)
 	if err != nil {
 		return nil, nil, fmt.Errorf("search: %w", err)
 	}
@@ -467,7 +480,7 @@ func (ic *indexerCache) handleSemanticSearch(ctx context.Context, req *mcp.CallT
 	// When the noise floor filtered out all results, check whether unfiltered
 	// results exist so we can tell the caller why the search came up empty.
 	if len(results) == 0 && maxDistance > 0 {
-		unfiltered, ufErr := idx.Search(ctx, effectiveRoot, queryVec, 1, 0, pathPrefix)
+		unfiltered, ufErr := idx.Search(searchCtx, effectiveRoot, queryVec, 1, 0, pathPrefix)
 		if ufErr == nil && len(unfiltered) > 0 {
 			bestScore := 1.0 - unfiltered[0].Distance
 			noiseFloor := 1.0 - maxDistance
@@ -563,7 +576,6 @@ func validateSearchInput(input *SemanticSearchInput) error {
 	}
 	return nil
 }
-
 
 func buildProgressFunc(ctx context.Context, req *mcp.CallToolRequest) index.ProgressFunc {
 	token := req.Params.GetProgressToken()
@@ -678,7 +690,11 @@ func (ic *indexerCache) ensureIndexed(idx *index.Indexer, input SemanticSearchIn
 		done <- freshResult{reindexed: reindexed, stats: stats, err: err}
 	})
 
-	timer := time.NewTimer(reindexTimeout)
+	timeout := ic.reindexTimeout
+	if timeout == 0 {
+		timeout = defaultReindexTimeout
+	}
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
 	select {
@@ -725,7 +741,7 @@ func (ic *indexerCache) ensureIndexed(idx *index.Indexer, input SemanticSearchIn
 	case <-timer.C:
 		ic.logger().Info("reindex timeout, returning stale results",
 			"project", projectDir,
-			"timeout", reindexTimeout,
+			"timeout", timeout,
 		)
 		out.StaleWarning = "Index is being updated in the background. Results may be incomplete or outdated. Use standard tools for the next 10 tool calls before trying semantic_search again."
 		return out, nil

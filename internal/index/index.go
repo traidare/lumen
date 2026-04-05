@@ -81,7 +81,7 @@ type StatusInfo struct {
 
 // Indexer orchestrates chunking, embedding, and storage for a code index.
 type Indexer struct {
-	mu             sync.RWMutex
+	mu             sync.Mutex
 	store          *store.Store
 	emb            embedder.Embedder
 	chunker        chunker.Chunker
@@ -521,14 +521,14 @@ func (idx *Indexer) LastIndexedAt() (time.Time, bool) {
 // IsFresh checks whether the index for projectDir is up to date by comparing
 // the current Merkle tree root hash against the stored one. Returns false if
 // the project has never been indexed (no stored hash).
+//
+// IsFresh does not acquire the indexer mutex; it reads through the store's
+// read-only connection (SQLite WAL isolation).
 func (idx *Indexer) IsFresh(projectDir string) (bool, error) {
 	curTree, err := merkle.BuildTree(projectDir, makeSkip(projectDir))
 	if err != nil {
 		return false, fmt.Errorf("build merkle tree: %w", err)
 	}
-
-	idx.mu.RLock()
-	defer idx.mu.RUnlock()
 
 	storedHash, err := idx.store.GetMeta("root_hash")
 	if err != nil && err != sql.ErrNoRows {
@@ -543,18 +543,20 @@ func (idx *Indexer) IsFresh(projectDir string) (bool, error) {
 // Search performs a vector similarity search against the index.
 // If maxDistance > 0, results with distance >= maxDistance are excluded.
 // If pathPrefix != "", only chunks under that relative path are returned.
-func (idx *Indexer) Search(_ context.Context, _ string, queryVec []float32, limit int, maxDistance float64, pathPrefix string) ([]store.SearchResult, error) {
-	idx.mu.RLock()
-	defer idx.mu.RUnlock()
-	return idx.store.Search(queryVec, limit, maxDistance, pathPrefix)
+//
+// Search uses a dedicated read-only database connection so it can execute
+// concurrently with write operations (e.g. during indexing). It does not
+// acquire the indexer mutex, relying on SQLite WAL mode for isolation.
+func (idx *Indexer) Search(ctx context.Context, _ string, queryVec []float32, limit int, maxDistance float64, pathPrefix string) ([]store.SearchResult, error) {
+	return idx.store.Search(ctx, queryVec, limit, maxDistance, pathPrefix)
 }
 
 // Status returns information about the current index state for a project.
 // All values are read from the database; no filesystem walk is performed.
+//
+// Status does not acquire the indexer mutex; it reads through the store's
+// read-only connection (SQLite WAL isolation).
 func (idx *Indexer) Status(projectDir string) (StatusInfo, error) {
-	idx.mu.RLock()
-	defer idx.mu.RUnlock()
-
 	var info StatusInfo
 	info.ProjectPath = projectDir
 

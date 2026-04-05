@@ -17,14 +17,14 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
-	"io"
-	"log/slog"
 	"time"
 
 	"flag"
@@ -1163,9 +1163,9 @@ func TestGetOrCreate_ReturnsSeedWarningWhenSeedFails(t *testing.T) {
 	}
 
 	ic := &indexerCache{
-		embedder:     &stubEmbedder{},
-		model:        "stub",
-		cfg:          config.Config{MaxChunkTokens: 512},
+		embedder:      &stubEmbedder{},
+		model:         "stub",
+		cfg:           config.Config{MaxChunkTokens: 512},
 		findDonorFunc: func(_, _ string) string { return "/fake/donor.db" },
 		seedFunc: func(_, _ string) (bool, error) {
 			return false, fmt.Errorf("permission denied")
@@ -1470,6 +1470,269 @@ func TestEnsureIndexed_SkipsMerkleWalkWhenRecentlyIndexedExternally(t *testing.T
 	}
 	if !ic.recentlyChecked(tmpDir) {
 		t.Fatal("expected recentlyChecked=true after skipping merkle walk")
+	}
+
+	ic.Close()
+}
+
+// TestEnsureIndexed_ConfigurableTimeout verifies that the reindexTimeout field
+// on indexerCache overrides the default 15s constant. This enables fast unit
+// tests and demonstrates the timeout mechanism fires at the configured duration.
+func TestEnsureIndexed_ConfigurableTimeout(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	idx, err := index.NewIndexer(dbPath, &stubEmbedder{}, 512)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = idx.Close() }()
+
+	const shortTimeout = 200 * time.Millisecond
+
+	ensureFreshDone := make(chan struct{})
+	ic := &indexerCache{
+		cache: map[string]cacheEntry{
+			tmpDir: {idx: idx, effectiveRoot: tmpDir},
+		},
+		reindexTimeout: shortTimeout,
+		ensureFreshFunc: func(_ context.Context, _ *index.Indexer, _ string, _ index.ProgressFunc) (bool, index.Stats, error) {
+			defer close(ensureFreshDone)
+			// Simulate a reindex that takes longer than the timeout
+			// but still finishes in reasonable time for the test.
+			time.Sleep(2 * time.Second)
+			return true, index.Stats{IndexedFiles: 50}, nil
+		},
+	}
+
+	start := time.Now()
+	out, err := ic.ensureIndexed(
+		idx,
+		SemanticSearchInput{Cwd: tmpDir, Path: tmpDir, Query: "test"},
+		tmpDir, dbPath, nil,
+	)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if out.StaleWarning == "" {
+		t.Fatal("expected StaleWarning to be set after timeout")
+	}
+	if out.Reindexed {
+		t.Fatal("expected Reindexed=false after timeout")
+	}
+
+	// The timeout should fire at approximately shortTimeout, not 15s.
+	if elapsed > 2*time.Second {
+		t.Fatalf("ensureIndexed took %v; expected ~%v (configurable timeout should override 15s default)", elapsed, shortTimeout)
+	}
+	if elapsed < shortTimeout {
+		t.Fatalf("ensureIndexed returned in %v, before the %v timeout — should not happen unless ensureFresh completed early", elapsed, shortTimeout)
+	}
+
+	ic.Close()
+
+	// Verify the background goroutine actually ran and completed.
+	select {
+	case <-ensureFreshDone:
+		// good — goroutine finished
+	default:
+		t.Fatal("background ensureFresh goroutine did not complete after Close()")
+	}
+}
+
+// TestEnsureIndexed_BackgroundContinuesAfterTimeout verifies that when the
+// timeout fires, the background goroutine continues running and completes its
+// reindex work. This is the core guarantee of the non-blocking design.
+func TestEnsureIndexed_BackgroundContinuesAfterTimeout(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	idx, err := index.NewIndexer(dbPath, &stubEmbedder{}, 512)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = idx.Close() }()
+
+	const shortTimeout = 100 * time.Millisecond
+
+	var bgCompleted int32
+	bgDone := make(chan struct{})
+	ic := &indexerCache{
+		cache: map[string]cacheEntry{
+			tmpDir: {idx: idx, effectiveRoot: tmpDir},
+		},
+		reindexTimeout: shortTimeout,
+		ensureFreshFunc: func(_ context.Context, _ *index.Indexer, _ string, _ index.ProgressFunc) (bool, index.Stats, error) {
+			// Simulate a reindex that takes longer than the timeout but
+			// completes successfully.
+			time.Sleep(500 * time.Millisecond)
+			bgCompleted = 1
+			close(bgDone)
+			return true, index.Stats{IndexedFiles: 77}, nil
+		},
+	}
+
+	out, err := ic.ensureIndexed(
+		idx,
+		SemanticSearchInput{Cwd: tmpDir, Path: tmpDir, Query: "test"},
+		tmpDir, dbPath, nil,
+	)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if out.StaleWarning == "" {
+		t.Fatal("expected StaleWarning after timeout")
+	}
+
+	// At this point, the background goroutine should still be running.
+	select {
+	case <-bgDone:
+		t.Fatal("background goroutine completed before expected — timeout may not have fired")
+	default:
+		// good — still running
+	}
+
+	// Wait for it to finish.
+	ic.Close()
+
+	if bgCompleted != 1 {
+		t.Fatal("background goroutine did not complete its reindex after timeout")
+	}
+}
+
+// TestEnsureIndexed_FastCompletionNoTimeout verifies that when ensureFresh
+// completes well before the configurable timeout, no stale warning is set
+// and the reindex results are properly returned.
+func TestEnsureIndexed_FastCompletionNoTimeout(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	idx, err := index.NewIndexer(dbPath, &stubEmbedder{}, 512)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = idx.Close() }()
+
+	ic := &indexerCache{
+		cache: map[string]cacheEntry{
+			tmpDir: {idx: idx, effectiveRoot: tmpDir},
+		},
+		reindexTimeout: 5 * time.Second,
+		ensureFreshFunc: func(_ context.Context, _ *index.Indexer, _ string, _ index.ProgressFunc) (bool, index.Stats, error) {
+			// Complete immediately — well within the timeout.
+			return true, index.Stats{IndexedFiles: 99}, nil
+		},
+	}
+
+	start := time.Now()
+	out, err := ic.ensureIndexed(
+		idx,
+		SemanticSearchInput{Cwd: tmpDir, Path: tmpDir, Query: "test"},
+		tmpDir, dbPath, nil,
+	)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if out.StaleWarning != "" {
+		t.Fatalf("unexpected StaleWarning: %s", out.StaleWarning)
+	}
+	if !out.Reindexed {
+		t.Fatal("expected Reindexed=true when ensureFresh completes within timeout")
+	}
+	if out.IndexedFiles != 99 {
+		t.Fatalf("expected IndexedFiles=99, got %d", out.IndexedFiles)
+	}
+	if elapsed > 1*time.Second {
+		t.Fatalf("fast ensureFresh took %v, expected <1s", elapsed)
+	}
+
+	ic.Close()
+}
+
+// TestEnsureIndexed_TimeoutDefaultsTo15Seconds verifies that when
+// reindexTimeout is not set (zero value), the default 15s constant is used.
+func TestEnsureIndexed_TimeoutDefaultsTo15Seconds(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	idx, err := index.NewIndexer(dbPath, &stubEmbedder{}, 512)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = idx.Close() }()
+
+	ic := &indexerCache{
+		cache: map[string]cacheEntry{
+			tmpDir: {idx: idx, effectiveRoot: tmpDir},
+		},
+		// reindexTimeout NOT set — should default to 15s.
+		ensureFreshFunc: func(_ context.Context, _ *index.Indexer, _ string, _ index.ProgressFunc) (bool, index.Stats, error) {
+			// Sleep longer than the 15s default timeout so the timer fires.
+			time.Sleep(20 * time.Second)
+			return true, index.Stats{IndexedFiles: 100}, nil
+		},
+	}
+
+	start := time.Now()
+	out, err := ic.ensureIndexed(
+		idx,
+		SemanticSearchInput{Cwd: tmpDir, Path: tmpDir, Query: "test"},
+		tmpDir, dbPath, nil,
+	)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if out.StaleWarning == "" {
+		t.Fatal("expected StaleWarning to be set after default timeout")
+	}
+	// Verify it waited approximately 15s (the default), not some other duration.
+	if elapsed < 14*time.Second || elapsed > 17*time.Second {
+		t.Fatalf("default timeout was %v, expected ~15s (defaultReindexTimeout)", elapsed)
+	}
+
+	ic.Close()
+}
+
+// TestEnsureIndexed_EnsureFreshErrorReturnsError verifies that when
+// ensureFresh completes within the timeout but returns an error, the error
+// is propagated to the caller.
+func TestEnsureIndexed_EnsureFreshErrorReturnsError(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	idx, err := index.NewIndexer(dbPath, &stubEmbedder{}, 512)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = idx.Close() }()
+
+	wantErr := fmt.Errorf("embedding server unreachable")
+	ic := &indexerCache{
+		cache: map[string]cacheEntry{
+			tmpDir: {idx: idx, effectiveRoot: tmpDir},
+		},
+		reindexTimeout: 5 * time.Second,
+		ensureFreshFunc: func(_ context.Context, _ *index.Indexer, _ string, _ index.ProgressFunc) (bool, index.Stats, error) {
+			return false, index.Stats{}, wantErr
+		},
+	}
+
+	_, err = ic.ensureIndexed(
+		idx,
+		SemanticSearchInput{Cwd: tmpDir, Path: tmpDir, Query: "test"},
+		tmpDir, dbPath, nil,
+	)
+	if err == nil {
+		t.Fatal("expected error from ensureFresh to propagate")
+	}
+	if !strings.Contains(err.Error(), "embedding server unreachable") {
+		t.Fatalf("expected error containing 'embedding server unreachable', got: %v", err)
 	}
 
 	ic.Close()

@@ -16,6 +16,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -71,6 +72,7 @@ type StoreStats struct { //nolint:revive // StoreStats is intentionally named to
 // embedding vectors.
 type Store struct {
 	db         *sql.DB
+	readDB     *sql.DB // separate read-only connection; nil for :memory: databases
 	dimensions int
 }
 
@@ -119,7 +121,46 @@ func openStore(dsn string, dimensions int) (*Store, error) {
 		return nil, fmt.Errorf("create schema: %w", err)
 	}
 
-	return &Store{db: db, dimensions: dimensions}, nil
+	s := &Store{db: db, dimensions: dimensions}
+
+	// Open a separate read-only connection for file-based databases. In WAL
+	// mode, readers do not block writers and vice versa, so Search and
+	// other read operations can proceed concurrently with indexing.
+	// :memory: databases cannot share state across connections.
+	if dsn != ":memory:" {
+		readDB, err := sql.Open("sqlite3", dsn+"?mode=ro")
+		if err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("open read db: %w", err)
+		}
+		readDB.SetMaxOpenConns(2)
+
+		readPragmas := []string{
+			"PRAGMA journal_mode=WAL",
+			"PRAGMA cache_size=-64000",
+			"PRAGMA temp_store=MEMORY",
+			"PRAGMA busy_timeout=120000",
+		}
+		for _, p := range readPragmas {
+			if _, err := readDB.Exec(p); err != nil {
+				_ = readDB.Close()
+				_ = db.Close()
+				return nil, fmt.Errorf("read db %q: %w", p, err)
+			}
+		}
+		s.readDB = readDB
+	}
+
+	return s, nil
+}
+
+// reader returns the read-only database connection when available (file-based
+// databases), falling back to the primary write connection for in-memory databases.
+func (s *Store) reader() *sql.DB {
+	if s.readDB != nil {
+		return s.readDB
+	}
+	return s.db
 }
 
 func createSchema(db *sql.DB, dimensions int) error {
@@ -255,9 +296,10 @@ func (s *Store) SetMeta(key, value string) error {
 }
 
 // GetMeta retrieves a value from the project_meta table by key.
+// It uses the read-only connection when available for concurrency with writes.
 func (s *Store) GetMeta(key string) (string, error) {
 	var val string
-	err := s.db.QueryRow("SELECT value FROM project_meta WHERE key = ?", key).Scan(&val)
+	err := s.reader().QueryRow("SELECT value FROM project_meta WHERE key = ?", key).Scan(&val)
 	if err != nil {
 		return "", err
 	}
@@ -265,7 +307,8 @@ func (s *Store) GetMeta(key string) (string, error) {
 }
 
 // GetMetaBatch retrieves multiple key-value pairs from project_meta in one query.
-// Missing keys are absent from the returned map.
+// Missing keys are absent from the returned map. Uses the read-only connection
+// when available for concurrency with writes.
 func (s *Store) GetMetaBatch(keys []string) (map[string]string, error) {
 	if len(keys) == 0 {
 		return map[string]string{}, nil
@@ -280,7 +323,7 @@ func (s *Store) GetMetaBatch(keys []string) (map[string]string, error) {
 		"SELECT key, value FROM project_meta WHERE key IN (%s)",
 		strings.Join(placeholders, ","),
 	)
-	rows, err := s.db.Query(query, args...)
+	rows, err := s.reader().Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query meta batch: %w", err)
 	}
@@ -424,7 +467,12 @@ func (s *Store) DeleteFileChunks(filePath string) error {
 // If pathPrefix != "", only chunks whose file_path equals pathPrefix or
 // starts with pathPrefix+"/" are returned; the KNN candidate count is
 // inflated to compensate for the post-JOIN filter.
-func (s *Store) Search(queryVec []float32, limit int, maxDistance float64, pathPrefix string) ([]SearchResult, error) {
+//
+// Search uses a dedicated read-only database connection (when available) so
+// that it can execute concurrently with write operations on the primary
+// connection (e.g. during indexing). The provided context is used for
+// query cancellation.
+func (s *Store) Search(ctx context.Context, queryVec []float32, limit int, maxDistance float64, pathPrefix string) ([]SearchResult, error) {
 	blob, err := sqlite_vec.SerializeFloat32(queryVec)
 	if err != nil {
 		return nil, fmt.Errorf("serialize query: %w", err)
@@ -460,7 +508,7 @@ func (s *Store) Search(queryVec []float32, limit int, maxDistance float64, pathP
 		LIMIT ?
 	`, strings.Join(whereClauses, "\n\t\tAND "))
 
-	rows, err := s.db.Query(query, args...)
+	rows, err := s.reader().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("search query: %w", err)
 	}
@@ -501,9 +549,10 @@ func (s *Store) GetFileHashes() (map[string]string, error) {
 }
 
 // Stats returns aggregate statistics about the store contents in one query.
+// Uses the read-only connection when available for concurrency with writes.
 func (s *Store) Stats() (StoreStats, error) {
 	var stats StoreStats
-	err := s.db.QueryRow(
+	err := s.reader().QueryRow(
 		`SELECT (SELECT count(*) FROM files), (SELECT count(*) FROM chunks)`,
 	).Scan(&stats.TotalFiles, &stats.TotalChunks)
 	if err != nil {
@@ -514,7 +563,7 @@ func (s *Store) Stats() (StoreStats, error) {
 
 // TopSymbols returns the n most frequently occurring symbol names in the store.
 func (s *Store) TopSymbols(n int) ([]string, error) {
-	rows, err := s.db.Query(
+	rows, err := s.reader().Query(
 		"SELECT symbol FROM chunks GROUP BY symbol ORDER BY count(*) DESC LIMIT ?", n,
 	)
 	if err != nil {
@@ -547,7 +596,10 @@ func (s *Store) Analyze() {
 	_, _ = s.db.Exec("ANALYZE")
 }
 
-// Close closes the underlying database connection.
+// Close closes the underlying database connections.
 func (s *Store) Close() error {
+	if s.readDB != nil {
+		_ = s.readDB.Close()
+	}
 	return s.db.Close()
 }
