@@ -1557,7 +1557,6 @@ func TestEnsureIndexed_BackgroundContinuesAfterTimeout(t *testing.T) {
 
 	const shortTimeout = 100 * time.Millisecond
 
-	var bgCompleted int32
 	bgDone := make(chan struct{})
 	ic := &indexerCache{
 		cache: map[string]cacheEntry{
@@ -1568,7 +1567,6 @@ func TestEnsureIndexed_BackgroundContinuesAfterTimeout(t *testing.T) {
 			// Simulate a reindex that takes longer than the timeout but
 			// completes successfully.
 			time.Sleep(500 * time.Millisecond)
-			bgCompleted = 1
 			close(bgDone)
 			return true, index.Stats{IndexedFiles: 77}, nil
 		},
@@ -1594,11 +1592,15 @@ func TestEnsureIndexed_BackgroundContinuesAfterTimeout(t *testing.T) {
 		// good — still running
 	}
 
-	// Wait for it to finish.
+	// Wait for it to finish. Close() calls wg.Wait(), which provides
+	// the happens-before edge guaranteeing bgDone is closed.
 	ic.Close()
 
-	if bgCompleted != 1 {
-		t.Fatal("background goroutine did not complete its reindex after timeout")
+	select {
+	case <-bgDone:
+		// good — goroutine completed its reindex
+	default:
+		t.Fatal("background goroutine did not complete its reindex after Close()")
 	}
 }
 

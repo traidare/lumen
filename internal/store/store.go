@@ -123,20 +123,30 @@ func openStore(dsn string, dimensions int) (*Store, error) {
 
 	s := &Store{db: db, dimensions: dimensions}
 
-	// Open a separate read-only connection for file-based databases. In WAL
-	// mode, readers do not block writers and vice versa, so Search and
-	// other read operations can proceed concurrently with indexing.
+	// Open a separate read connection for file-based databases. In WAL mode,
+	// readers do not block writers and vice versa, so Search and other read
+	// operations can proceed concurrently with indexing.
 	// :memory: databases cannot share state across connections.
+	//
+	// We deliberately do NOT use ?mode=ro (SQLITE_OPEN_READONLY) because on
+	// Linux a read-only connection cannot always mmap the WAL shared-memory
+	// file, causing it to silently fall back to reading only the main
+	// database file (missing uncommitted WAL data). Instead we open a
+	// normal connection and set PRAGMA query_only=ON, which prevents writes
+	// at the SQL level while keeping full WAL read visibility.
 	if dsn != ":memory:" {
-		readDB, err := sql.Open("sqlite3", dsn+"?mode=ro")
+		readDB, err := sql.Open("sqlite3", dsn)
 		if err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("open read db: %w", err)
 		}
-		readDB.SetMaxOpenConns(2)
+		readDB.SetMaxOpenConns(1)
 
+		// WAL journal mode is inherited from the database file (set by the
+		// write connection), so we don't set it here. We configure
+		// query_only to prevent accidental writes and tune performance.
 		readPragmas := []string{
-			"PRAGMA journal_mode=WAL",
+			"PRAGMA query_only=ON",
 			"PRAGMA cache_size=-64000",
 			"PRAGMA temp_store=MEMORY",
 			"PRAGMA busy_timeout=120000",

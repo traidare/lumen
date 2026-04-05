@@ -477,3 +477,48 @@ func TestStore_SearchPathPrefixNoFalsePositives(t *testing.T) {
 		t.Fatalf("expected internal/store/store.go, got %s", results[0].FilePath)
 	}
 }
+
+func TestStore_FileBasedReadConnection(t *testing.T) {
+	dsn := filepath.Join(t.TempDir(), "test.db")
+	s, err := New(dsn, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+
+	// Verify read connection is set for file-based databases.
+	if s.readDB == nil {
+		t.Fatal("expected readDB to be set for file-based store")
+	}
+
+	// Write data via write connection.
+	if err := s.UpsertFile("main.go", "abc123"); err != nil {
+		t.Fatal(err)
+	}
+	chunks := []chunker.Chunk{
+		{ID: "chunk1", FilePath: "main.go", Symbol: "Hello", Kind: "function", StartLine: 1, EndLine: 5},
+		{ID: "chunk2", FilePath: "main.go", Symbol: "World", Kind: "function", StartLine: 6, EndLine: 10},
+	}
+	vectors := [][]float32{
+		{0.1, 0.2, 0.3, 0.4},
+		{0.9, 0.8, 0.7, 0.6},
+	}
+	if err := s.InsertChunks(chunks, vectors); err != nil {
+		t.Fatal(err)
+	}
+
+	// Search uses the read connection — should see committed data via WAL.
+	results, err := s.Search(context.Background(), []float32{0.1, 0.2, 0.3, 0.4}, 2, 0, "")
+	if err != nil {
+		t.Fatalf("search error: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results from read connection, got %d", len(results))
+	}
+
+	// Verify that the read connection is query-only (cannot write).
+	_, err = s.readDB.Exec("INSERT INTO project_meta (key, value) VALUES ('test', 'val')")
+	if err == nil {
+		t.Fatal("expected write on read connection to fail (query_only=ON)")
+	}
+}

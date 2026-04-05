@@ -121,6 +121,7 @@ type HealthCheckOutput struct {
 // Override with LUMEN_FRESHNESS_TTL (e.g. "1s", "30s") for testing.
 const defaultFreshnessTTL = 30 * time.Second
 const defaultReindexTimeout = 15 * time.Second
+const defaultSearchTimeout = 20 * time.Second
 const backgroundReindexMaxDuration = 10 * time.Minute
 
 type cacheEntry struct {
@@ -464,12 +465,7 @@ func (ic *indexerCache) handleSemanticSearch(ctx context.Context, req *mcp.CallT
 	// Defense-in-depth: bound the search call so that even if a future
 	// regression reintroduces mutex contention, we return within a
 	// predictable time rather than hanging indefinitely.
-	searchTimeout := ic.reindexTimeout
-	if searchTimeout == 0 {
-		searchTimeout = defaultReindexTimeout
-	}
-	searchTimeout += 5 * time.Second
-	searchCtx, searchCancel := context.WithTimeout(ctx, searchTimeout)
+	searchCtx, searchCancel := context.WithTimeout(ctx, defaultSearchTimeout)
 	defer searchCancel()
 
 	results, err := idx.Search(searchCtx, effectiveRoot, queryVec, fetchLimit, maxDistance, pathPrefix)
