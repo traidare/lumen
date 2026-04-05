@@ -1217,11 +1217,12 @@ func runStdio(_ *cobra.Command, _ []string) error {
 	)
 
 	indexers := &indexerCache{
-		embedder:     emb,
-		model:        cfg.Model,
-		cfg:          cfg,
-		freshnessTTL: cfg.FreshnessTTL,
-		log:          logger,
+		embedder:       emb,
+		model:          cfg.Model,
+		cfg:            cfg,
+		freshnessTTL:   cfg.FreshnessTTL,
+		reindexTimeout: cfg.ReindexTimeout,
+		log:            logger,
 	}
 	defer indexers.Close()
 

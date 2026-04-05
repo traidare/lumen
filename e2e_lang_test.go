@@ -58,6 +58,11 @@ func startLangServer(t *testing.T) *mcp.ClientSession {
 		// our 4-chars-per-token estimate, so cap chunks at 100 "tokens" (400
 		// chars) to stay within the model's 512-token context window.
 		"LUMEN_MAX_CHUNK_TOKENS=100",
+		// Lang tests need indexing to complete before the first search returns.
+		// On CI, 12 parallel test suites share a single Ollama instance, so
+		// embedding can take well over the default 15s timeout. Allow up to 5m
+		// to avoid returning 0 results from an incomplete index.
+		"LUMEN_REINDEX_TIMEOUT=5m",
 		"XDG_DATA_HOME=" + dataHome,
 		"HOME=" + os.Getenv("HOME"),
 		"PATH=" + os.Getenv("PATH"),

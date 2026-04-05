@@ -43,6 +43,7 @@ type Config struct {
 	Backend        string
 	LMStudioHost   string
 	FreshnessTTL   time.Duration
+	ReindexTimeout time.Duration
 }
 
 // Load reads configuration from environment variables and the model registry.
@@ -79,7 +80,6 @@ func Load() (Config, error) {
 		ctxLength = 8192
 	}
 
-
 	return Config{
 		Model:          model,
 		Dims:           dims,
@@ -89,6 +89,7 @@ func Load() (Config, error) {
 		Backend:        backend,
 		LMStudioHost:   EnvOrDefault("LM_STUDIO_HOST", "http://localhost:1234"),
 		FreshnessTTL:   EnvOrDefaultDuration("LUMEN_FRESHNESS_TTL", 60*time.Second),
+		ReindexTimeout: EnvOrDefaultDuration("LUMEN_REINDEX_TIMEOUT", 0),
 	}, nil
 }
 
