@@ -1020,7 +1020,7 @@ func TestEnsureIndexed_SkipsWhenLockHeld(t *testing.T) {
 	}
 
 	// With the lock held by the subprocess, ensureIndexed must skip EnsureFresh.
-	input := SemanticSearchInput{Cwd: projectPath, Path: projectPath, Query: "test", NResults: 8}
+	input := SemanticSearchInput{Cwd: projectPath, Path: projectPath, Query: "test", Limit: 8}
 	out, err := ic.ensureIndexed(idx, input, effectiveRoot, dbPath, nil)
 	if err != nil {
 		t.Fatalf("ensureIndexed returned unexpected error: %v", err)
@@ -1246,7 +1246,7 @@ func TestEnsureIndexed_FreshnessTTL(t *testing.T) {
 		Path:     projectDir,
 		Cwd:      projectDir,
 		Query:    "test",
-		NResults: 8,
+		Limit: 8,
 	}
 
 	dbPath := config.DBPathForProject(effectiveRoot, ic.model)

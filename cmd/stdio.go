@@ -56,7 +56,7 @@ type SemanticSearchInput struct {
 	Query    string   `json:"query" jsonschema:"Natural language search query"`
 	Path     string   `json:"path,omitempty" jsonschema:"Absolute path to search in. Defaults to cwd. When a subdirectory of cwd, results are filtered to that subtree."`
 	Cwd      string   `json:"cwd,omitempty" jsonschema:"The current working directory / project root. Used as index root when provided."`
-	NResults int      `json:"n_results,omitempty" jsonschema:"Max results to return, default 8"`
+	Limit    int      `json:"limit,omitempty" jsonschema:"Max results to return, default 8. Pass a higher value for broader coverage."`
 	MinScore *float64 `json:"min_score,omitempty" jsonschema:"Minimum score threshold (-1 to 1). Results below this score are excluded. Default depends on embedding model. Use -1 to return all results."`
 	Summary  bool     `json:"summary,omitempty" jsonschema:"When true, return only file path, symbol, kind, line range, and score — no code content. Useful for location-only queries."`
 	MaxLines int      `json:"max_lines,omitempty" jsonschema:"Truncate each code snippet to this many lines. Default: unlimited."`
@@ -426,7 +426,7 @@ func (ic *indexerCache) handleSemanticSearch(ctx context.Context, req *mcp.CallT
 	ic.logger().Debug("semantic search request",
 		"cwd", input.Cwd,
 		"search_path", input.Path,
-		"n_results", input.NResults,
+		"limit", input.Limit,
 	)
 
 	idx, effectiveRoot, seedWarning, err := ic.getOrCreate(input.Path, input.Cwd)
@@ -460,7 +460,7 @@ func (ic *indexerCache) handleSemanticSearch(ctx context.Context, req *mcp.CallT
 
 	// Over-fetch from KNN so that merging overlapping split chunks doesn't
 	// reduce the final result count below the requested limit.
-	fetchLimit := input.NResults * 2
+	fetchLimit := input.Limit * 2
 
 	// Defense-in-depth: bound the search call so that even if a future
 	// regression reintroduces mutex contention, we return within a
@@ -511,8 +511,8 @@ func (ic *indexerCache) handleSemanticSearch(ctx context.Context, req *mcp.CallT
 	})
 
 	// Cap to the originally requested limit after merging.
-	if len(items) > input.NResults {
-		items = items[:input.NResults]
+	if len(items) > input.Limit {
+		items = items[:input.Limit]
 	}
 
 	// Extract snippets for merged results.
@@ -567,8 +567,8 @@ func validateSearchInput(input *SemanticSearchInput) error {
 	if input.Query == "" {
 		return fmt.Errorf("query is required")
 	}
-	if input.NResults <= 0 {
-		input.NResults = 8
+	if input.Limit <= 0 {
+		input.Limit = 8
 	}
 	return nil
 }
@@ -1262,7 +1262,7 @@ This includes:
 
 Auto-indexes if the index is stale or empty.
 
-Tip: If a search returns no results, retry with a lower min_score (e.g. 0.0 or -1) before trying a completely different query. Increase limit beyond 10 if you need broader coverage.`,
+Tip: If a search returns no results, retry with a lower min_score (e.g. 0.0 or -1) before trying a completely different query. Increase limit (e.g. limit: 20) for broader coverage.`,
 	}, indexers.handleSemanticSearch)
 
 	mcp.AddTool(server, &mcp.Tool{

@@ -89,7 +89,7 @@ func langSearch(t *testing.T, session *mcp.ClientSession, lang, query string) st
 	out := callSearch(t, session, map[string]any{
 		"query":     query,
 		"path":      dir,
-		"n_results": 10,
+		"limit": 10,
 		"min_score": -1.0,
 	})
 	// Sort by (filePath, startLine) for deterministic snapshots across environments.

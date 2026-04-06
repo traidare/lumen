@@ -450,7 +450,7 @@ func TestE2E_IndexAndSearchResults(t *testing.T) {
 	out := callSearch(t, session, map[string]any{
 		"query":     "authentication token validation",
 		"path":      projectPath,
-		"n_results": 5,
+		"limit": 5,
 	})
 
 	if !out.Reindexed {
@@ -527,7 +527,7 @@ func TestE2E_PlaintextContent(t *testing.T) {
 	result := callSearchRaw(t, session, map[string]any{
 		"query":     "authentication token validation",
 		"path":      projectPath,
-		"n_results": 3,
+		"limit": 3,
 	})
 
 	if result.IsError {
@@ -589,7 +589,7 @@ func TestE2E_SearchRelevanceRanking(t *testing.T) {
 	out := callSearch(t, session, map[string]any{
 		"query":     "HTTP request handler for health check endpoint",
 		"path":      projectPath,
-		"n_results": 50,
+		"limit": 50,
 		"min_score": -1,
 	})
 	healthRank := rankOf(out.Results, "HandleHealth")
@@ -599,7 +599,7 @@ func TestE2E_SearchRelevanceRanking(t *testing.T) {
 		raw := callSearchRaw(t, session, map[string]any{
 			"query":     "HTTP request handler for health check endpoint",
 			"path":      projectPath,
-			"n_results": 50,
+			"limit": 50,
 			"min_score": -1,
 		})
 		t.Logf("raw text:\n%s", getTextContent(t, raw))
@@ -617,7 +617,7 @@ func TestE2E_SearchRelevanceRanking(t *testing.T) {
 	out2 := callSearch(t, session, map[string]any{
 		"query":     "database query pagination",
 		"path":      projectPath,
-		"n_results": 50,
+		"limit": 50,
 		"min_score": -1,
 	})
 	queryRank := rankOf(out2.Results, "QueryUsers")
@@ -634,41 +634,41 @@ func TestE2E_SearchRelevanceRanking(t *testing.T) {
 	}
 }
 
-func TestE2E_NResultsParameter(t *testing.T) {
+func TestE2E_LimitParameter(t *testing.T) {
 	t.Parallel()
 	session := startServer(t)
 	projectPath := sampleProjectPath(t)
 
-	// n_results=1 should return exactly 1. Use min_score=-1 to bypass score filtering.
+	// limit=1 should return exactly 1. Use min_score=-1 to bypass score filtering.
 	out1 := callSearch(t, session, map[string]any{
 		"query":     "user",
 		"path":      projectPath,
-		"n_results": 1,
+		"limit": 1,
 		"min_score": -1,
 	})
 	if len(out1.Results) != 1 {
-		t.Errorf("n_results=1: expected exactly 1 result, got %d", len(out1.Results))
+		t.Errorf("limit=1: expected exactly 1 result, got %d", len(out1.Results))
 	}
 
-	// n_results=3 should return at most 3.
+	// limit=3 should return at most 3.
 	out3 := callSearch(t, session, map[string]any{
 		"query":     "user",
 		"path":      projectPath,
-		"n_results": 3,
+		"limit": 3,
 		"min_score": -1,
 	})
 	if len(out3.Results) > 3 {
-		t.Errorf("n_results=3: expected at most 3 results, got %d", len(out3.Results))
+		t.Errorf("limit=3: expected at most 3 results, got %d", len(out3.Results))
 	}
 
-	// No n_results (omitted) should return results (default 8 kicks in).
+	// No limit (omitted) should return results (default 8 kicks in).
 	outDefault := callSearch(t, session, map[string]any{
 		"query":     "user",
 		"path":      projectPath,
 		"min_score": -1,
 	})
 	if len(outDefault.Results) == 0 {
-		t.Error("no n_results: expected results with default")
+		t.Error("no limit: expected results with default")
 	}
 }
 
@@ -681,7 +681,7 @@ func TestE2E_MinScoreFilter(t *testing.T) {
 	outAll := callSearch(t, session, map[string]any{
 		"query":     "authentication token validation",
 		"path":      projectPath,
-		"n_results": 50,
+		"limit": 50,
 		"min_score": -1,
 	})
 	if len(outAll.Results) == 0 {
@@ -692,7 +692,7 @@ func TestE2E_MinScoreFilter(t *testing.T) {
 	outFiltered := callSearch(t, session, map[string]any{
 		"query":     "authentication token validation",
 		"path":      projectPath,
-		"n_results": 50,
+		"limit": 50,
 		"min_score": 0.5,
 	})
 
@@ -1175,7 +1175,7 @@ func ValidateTokenV2(token string) bool {
 		"query":     "token validation",
 		"path":      wtDir,
 		"cwd":       wtDir,
-		"n_results": 10,
+		"limit": 10,
 		"min_score": -1,
 	})
 	if !out1.Reindexed {
@@ -1266,7 +1266,7 @@ func HandleRequest(w http.ResponseWriter, r *http.Request) {
 		"query":     "HTTP request handler",
 		"path":      subDir,
 		"cwd":       repoDir,
-		"n_results": 5,
+		"limit": 5,
 		"min_score": -1,
 	})
 	if !out1.Reindexed {
@@ -1279,7 +1279,7 @@ func HandleRequest(w http.ResponseWriter, r *http.Request) {
 		"query":     "HTTP request handler",
 		"path":      subDir,
 		"cwd":       repoDir,
-		"n_results": 5,
+		"limit": 5,
 		"min_score": -1,
 	})
 	if out2.Reindexed {
@@ -1303,7 +1303,7 @@ func HandleRequest(w http.ResponseWriter, r *http.Request) {
 		"query":     "HTTP request handler",
 		"path":      subDir,
 		"cwd":       repoDir,
-		"n_results": 5,
+		"limit": 5,
 		"min_score": -1,
 	})
 	if out3.Reindexed {
@@ -1354,7 +1354,7 @@ func HandleLogin() {}
 	out1 := callSearch(t, session, map[string]any{
 		"query":     "start server",
 		"path":      pkgDir,
-		"n_results": 5,
+		"limit": 5,
 		"min_score": -1,
 	})
 	if !out1.Reindexed {
@@ -1369,7 +1369,7 @@ func HandleLogin() {}
 	out2 := callSearch(t, session, map[string]any{
 		"query":     "login handler",
 		"path":      apiDir,
-		"n_results": 5,
+		"limit": 5,
 		"min_score": -1,
 	})
 	if out2.Reindexed {
@@ -1383,7 +1383,7 @@ func HandleLogin() {}
 	out3 := callSearch(t, session, map[string]any{
 		"query":     "start server",
 		"path":      repoDir,
-		"n_results": 5,
+		"limit": 5,
 		"min_score": -1,
 	})
 	if findResult(out3.Results, "StartServer") == nil {
@@ -1523,7 +1523,7 @@ func FeatureFlag() bool { return false }
 		"query":     "feature flag rollout",
 		"path":      repoDir,
 		"cwd":       repoDir,
-		"n_results": 10,
+		"limit": 10,
 		"min_score": -1,
 	})
 	if findResult(out2.Results, "FeatureFlag") != nil {

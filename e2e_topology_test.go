@@ -316,7 +316,7 @@ func AuthenticateUser() {}
 			args := map[string]any{
 				"query":     tc.query,
 				"path":      setup.searchPath,
-				"n_results": 10,
+				"limit": 10,
 				"min_score": -1,
 			}
 			if setup.cwd != "" {
@@ -364,7 +364,7 @@ func AuthenticateUser() {}
 				secondArgs := map[string]any{
 					"query":     tc.second.query,
 					"path":      secondPath,
-					"n_results": 10,
+					"limit": 10,
 					"min_score": -1,
 				}
 
@@ -415,7 +415,7 @@ func SubHelper() {}
 	out1 := callSearch(t, session, map[string]any{
 		"query":     "start server",
 		"path":      dir,
-		"n_results": 10,
+		"limit": 10,
 		"min_score": -1,
 	})
 	if !out1.Reindexed {
@@ -432,7 +432,7 @@ func SubHelper() {}
 	out2 := callSearch(t, session, map[string]any{
 		"query":     "sub helper",
 		"path":      subDir,
-		"n_results": 10,
+		"limit": 10,
 		"min_score": -1,
 	})
 	if out2.Reindexed {
@@ -469,7 +469,7 @@ func NpmHelper() {}
 	out1 := callSearch(t, session, map[string]any{
 		"query":     "start server",
 		"path":      dir,
-		"n_results": 10,
+		"limit": 10,
 		"min_score": -1,
 	})
 	if !out1.Reindexed {
@@ -480,7 +480,7 @@ func NpmHelper() {}
 	out2 := callSearch(t, session, map[string]any{
 		"query":     "npm helper",
 		"path":      nmDir,
-		"n_results": 10,
+		"limit": 10,
 		"min_score": -1,
 	})
 	if !out2.Reindexed {
