@@ -71,6 +71,9 @@ func TestModelAliases(t *testing.T) {
 		if alias == canonical {
 			t.Errorf("alias %q maps to itself — remove it from ModelAliases", alias)
 		}
+		if _, ok := ModelAliases[canonical]; ok {
+			t.Errorf("alias %q target %q is itself an alias — chained aliases are not supported", alias, canonical)
+		}
 	}
 }
 
