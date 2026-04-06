@@ -594,9 +594,11 @@ func (s *Store) TopSymbols(n int) ([]string, error) {
 
 // HasSentinelFiles reports whether any files have an empty hash, indicating
 // they were registered but never fully indexed (interrupted run).
+// Uses the read-only connection when available for consistency with other
+// read methods (GetMeta, Stats, Search).
 func (s *Store) HasSentinelFiles() (bool, error) {
 	var exists bool
-	err := s.db.QueryRow("SELECT EXISTS(SELECT 1 FROM files WHERE hash = '')").Scan(&exists)
+	err := s.reader().QueryRow("SELECT EXISTS(SELECT 1 FROM files WHERE hash = '')").Scan(&exists)
 	return exists, err
 }
 

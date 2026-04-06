@@ -1739,3 +1739,157 @@ func TestEnsureIndexed_EnsureFreshErrorReturnsError(t *testing.T) {
 
 	ic.Close()
 }
+
+// TestEnsureIndexed_DeduplicatesInProcessGoroutines verifies that two
+// concurrent ensureIndexed calls for the same project only spawn one
+// background goroutine. The second call should return a stale warning
+// immediately instead of spawning a redundant goroutine.
+func TestEnsureIndexed_DeduplicatesInProcessGoroutines(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	idx, err := index.NewIndexer(dbPath, &stubEmbedder{}, 512)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = idx.Close() }()
+
+	// Track how many times ensureFreshFunc is called.
+	var callCount int32
+	var callMu sync.Mutex
+	started := make(chan struct{}) // signals first ensureFresh entered
+
+	closeCtx, closeFn := context.WithCancel(context.Background())
+	defer closeFn()
+
+	ic := &indexerCache{
+		cache: map[string]cacheEntry{
+			tmpDir: {idx: idx, effectiveRoot: tmpDir},
+		},
+		reindexTimeout: 200 * time.Millisecond,
+		freshnessTTL:   1 * time.Nanosecond,
+		log:            discardLog,
+		closeCtx:       closeCtx,
+		closeFn:        closeFn,
+		ensureFreshFunc: func(ctx context.Context, _ *index.Indexer, _ string, _ index.ProgressFunc) (bool, index.Stats, error) {
+			callMu.Lock()
+			callCount++
+			callMu.Unlock()
+
+			// Signal that we're inside ensureFresh, then block.
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			// Block until context cancelled (simulating slow reindex).
+			<-ctx.Done()
+			return false, index.Stats{}, ctx.Err()
+		},
+	}
+
+	input := SemanticSearchInput{Cwd: tmpDir, Path: tmpDir, Query: "test"}
+
+	// First call: spawns background goroutine that enters ensureFreshFunc.
+	go func() {
+		_, _ = ic.ensureIndexed(idx, input, tmpDir, dbPath, nil)
+	}()
+
+	// Wait for the first goroutine to enter ensureFreshFunc.
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first ensureFresh never started")
+	}
+
+	// Second call: should detect the in-process goroutine and return
+	// immediately with a stale warning (no second goroutine spawned).
+	out, err := ic.ensureIndexed(idx, input, tmpDir, dbPath, nil)
+	if err != nil {
+		t.Fatalf("second ensureIndexed returned error: %v", err)
+	}
+	if out.StaleWarning == "" {
+		t.Fatal("expected StaleWarning from deduplicated second call")
+	}
+
+	callMu.Lock()
+	count := callCount
+	callMu.Unlock()
+	if count != 1 {
+		t.Fatalf("expected ensureFreshFunc to be called exactly once, got %d", count)
+	}
+
+	ic.Close()
+}
+
+// TestIndexerCache_CloseCancelsBackgroundGoroutines verifies that Close()
+// cancels running background goroutines via closeCtx and does not block
+// for the full backgroundReindexMaxDuration.
+func TestIndexerCache_CloseCancelsBackgroundGoroutines(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	idx, err := index.NewIndexer(dbPath, &stubEmbedder{}, 512)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = idx.Close() }()
+
+	var ctxErr error
+	var ctxErrMu sync.Mutex
+	started := make(chan struct{})
+
+	closeCtx, closeFn := context.WithCancel(context.Background())
+
+	ic := &indexerCache{
+		cache: map[string]cacheEntry{
+			tmpDir: {idx: idx, effectiveRoot: tmpDir},
+		},
+		reindexTimeout: 200 * time.Millisecond,
+		freshnessTTL:   1 * time.Nanosecond,
+		log:            discardLog,
+		closeCtx:       closeCtx,
+		closeFn:        closeFn,
+		ensureFreshFunc: func(ctx context.Context, _ *index.Indexer, _ string, _ index.ProgressFunc) (bool, index.Stats, error) {
+			close(started)
+			// Block until context is cancelled by Close().
+			<-ctx.Done()
+			ctxErrMu.Lock()
+			ctxErr = ctx.Err()
+			ctxErrMu.Unlock()
+			return false, index.Stats{}, ctx.Err()
+		},
+	}
+
+	input := SemanticSearchInput{Cwd: tmpDir, Path: tmpDir, Query: "test"}
+
+	// Trigger a background reindex.
+	_, _ = ic.ensureIndexed(idx, input, tmpDir, dbPath, nil)
+
+	// Wait for ensureFresh to start.
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ensureFresh never started")
+	}
+
+	// Close should cancel the background context and return promptly.
+	closeDone := make(chan struct{})
+	go func() {
+		ic.Close()
+		close(closeDone)
+	}()
+
+	select {
+	case <-closeDone:
+		// Close returned within the deadline — good.
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close() blocked for >5s; expected prompt return after context cancellation")
+	}
+
+	ctxErrMu.Lock()
+	finalErr := ctxErr
+	ctxErrMu.Unlock()
+	if finalErr != context.Canceled {
+		t.Fatalf("expected context.Canceled in ensureFresh, got: %v", finalErr)
+	}
+}

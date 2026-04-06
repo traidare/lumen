@@ -135,6 +135,7 @@ type cacheEntry struct {
 type indexerCache struct {
 	mu              sync.RWMutex
 	cache           map[string]cacheEntry
+	reindexing      map[string]bool // projects with an active background reindex goroutine
 	embedder        embedder.Embedder
 	model           string
 	cfg             config.Config
@@ -144,7 +145,9 @@ type indexerCache struct {
 	seedFunc        func(string, string) (bool, error)                                                                                       // nil uses index.SeedFromDonor
 	ensureFreshFunc func(ctx context.Context, idx *index.Indexer, projectDir string, progress index.ProgressFunc) (bool, index.Stats, error) // nil uses idx.EnsureFresh
 	log             *slog.Logger
-	wg              sync.WaitGroup // tracks background reindex goroutines
+	wg              sync.WaitGroup     // tracks background reindex goroutines
+	closeCtx        context.Context    // cancelled by Close() to signal background goroutines
+	closeFn         context.CancelFunc // cancels closeCtx
 }
 
 // logger returns ic.log, falling back to a discarding logger when the field
@@ -156,12 +159,28 @@ func (ic *indexerCache) logger() *slog.Logger {
 	return ic.log
 }
 
-// Close waits for any background reindex goroutines to finish, then
-// closes all cached indexers. Call on MCP server shutdown.
-// Worst-case wait is backgroundReindexMaxDuration (10 min) if a
-// background reindex is in progress.
+// Close cancels all background reindex goroutines, waits for them to drain
+// (up to 30 seconds), then closes all cached indexers. Call on MCP server
+// shutdown.
 func (ic *indexerCache) Close() {
-	ic.wg.Wait()
+	// Signal all background goroutines to stop.
+	if ic.closeFn != nil {
+		ic.closeFn()
+	}
+
+	// Wait for goroutines to finish, with a hard ceiling so a stuck
+	// goroutine (e.g. unresponsive embedder ignoring context) does not
+	// block shutdown indefinitely.
+	done := make(chan struct{})
+	go func() {
+		ic.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+	}
+
 	ic.mu.Lock()
 	defer ic.mu.Unlock()
 	seen := make(map[*index.Indexer]bool)
@@ -621,6 +640,22 @@ func (ic *indexerCache) ensureIndexed(idx *index.Indexer, input SemanticSearchIn
 		"effective_root", projectDir,
 	)
 
+	// If an in-process background goroutine is already reindexing this
+	// project, skip spawning another one. This prevents redundant merkle
+	// tree walks and avoids macOS flock(2) same-process reentrance issues.
+	ic.mu.Lock()
+	if ic.reindexing != nil && ic.reindexing[projectDir] {
+		ic.mu.Unlock()
+		ic.logger().Debug("skipping reindex: in-process background goroutine already running", "project", projectDir)
+		out.StaleWarning = "Index is being updated in the background. Results may be incomplete or outdated. Use standard tools for the next 10 tool calls before trying semantic_search again."
+		return out, nil
+	}
+	if ic.reindexing == nil {
+		ic.reindexing = make(map[string]bool)
+	}
+	ic.reindexing[projectDir] = true
+	ic.mu.Unlock()
+
 	// Run EnsureFresh in a goroutine with a 15s timeout. If reindexing
 	// takes longer, return stale results with a warning while the
 	// goroutine continues in the background.
@@ -632,11 +667,20 @@ func (ic *indexerCache) ensureIndexed(idx *index.Indexer, input SemanticSearchIn
 	}
 	done := make(chan freshResult, 1) // buffered: goroutine must never block on send
 
-	bgCtx, bgCancel := context.WithTimeout(context.Background(), backgroundReindexMaxDuration)
+	bgParent := context.Background()
+	if ic.closeCtx != nil {
+		bgParent = ic.closeCtx
+	}
+	bgCtx, bgCancel := context.WithTimeout(bgParent, backgroundReindexMaxDuration)
 
 	lockPath := indexlock.LockPathForDB(dbPath)
 	ic.wg.Go(func() {
 		defer bgCancel()
+		defer func() {
+			ic.mu.Lock()
+			delete(ic.reindexing, projectDir)
+			ic.mu.Unlock()
+		}()
 
 		lk, lockErr := indexlock.TryAcquire(lockPath)
 		if lockErr != nil {
@@ -1216,6 +1260,7 @@ func runStdio(_ *cobra.Command, _ []string) error {
 		"freshness_ttl", cfg.FreshnessTTL.String(),
 	)
 
+	closeCtx, closeFn := context.WithCancel(context.Background())
 	indexers := &indexerCache{
 		embedder:       emb,
 		model:          cfg.Model,
@@ -1223,6 +1268,8 @@ func runStdio(_ *cobra.Command, _ []string) error {
 		freshnessTTL:   cfg.FreshnessTTL,
 		reindexTimeout: cfg.ReindexTimeout,
 		log:            logger,
+		closeCtx:       closeCtx,
+		closeFn:        closeFn,
 	}
 	defer indexers.Close()
 
