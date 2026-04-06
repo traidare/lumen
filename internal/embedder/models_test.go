@@ -63,6 +63,17 @@ func TestDefaultLMStudioModelInRegistry(t *testing.T) {
 	}
 }
 
+func TestModelAliases(t *testing.T) {
+	for alias, canonical := range ModelAliases {
+		if _, ok := KnownModels[canonical]; !ok {
+			t.Errorf("alias %q points to %q which is not in KnownModels", alias, canonical)
+		}
+		if alias == canonical {
+			t.Errorf("alias %q maps to itself — remove it from ModelAliases", alias)
+		}
+	}
+}
+
 func TestDimensionAwareMinScore(t *testing.T) {
 	tests := []struct {
 		dims int

@@ -125,6 +125,27 @@ func TestLoad(t *testing.T) {
 	}
 }
 
+func TestLoadAliasResolution(t *testing.T) {
+	t.Setenv("LUMEN_BACKEND", "lmstudio")
+	t.Setenv("LUMEN_EMBED_MODEL", "text-embedding-nomic-embed-code")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Dims != 3584 {
+		t.Errorf("Dims: got %d, want 3584", cfg.Dims)
+	}
+	if cfg.CtxLength != 8192 {
+		t.Errorf("CtxLength: got %d, want 8192", cfg.CtxLength)
+	}
+	// Config.Model must stay as user-configured name — LM Studio API expects
+	// "text-embedding-nomic-embed-code", not "nomic-ai/nomic-embed-code-GGUF".
+	if cfg.Model != "text-embedding-nomic-embed-code" {
+		t.Errorf("Model: got %q, want %q", cfg.Model, "text-embedding-nomic-embed-code")
+	}
+}
+
 func TestDBPathForProject(t *testing.T) {
 	t.Run("deterministic", func(t *testing.T) {
 		p1 := DBPathForProject("/home/user/project", "model-a")

@@ -63,7 +63,11 @@ func Load() (Config, error) {
 	overrideDims := EnvOrDefaultInt("LUMEN_EMBED_DIMS", 0)
 	overrideCtx := EnvOrDefaultInt("LUMEN_EMBED_CTX", 0)
 
-	spec, modelKnown := embedder.KnownModels[model]
+	specKey := model
+	if canonical, ok := embedder.ModelAliases[model]; ok {
+		specKey = canonical
+	}
+	spec, modelKnown := embedder.KnownModels[specKey]
 	if !modelKnown && overrideDims == 0 {
 		return Config{}, fmt.Errorf("unknown embedding model %q: set LUMEN_EMBED_DIMS to use an unlisted model", model)
 	}
