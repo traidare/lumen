@@ -405,6 +405,23 @@ In Codex, use the bundled `reindex` skill to refresh the index through the MCP
 server, or run the same CLI commands for a clean rebuild. The same shared
 `reindex` skill is available in Cursor and OpenCode as well.
 
+**LM Studio: embedding model appears under LLMs instead of Embeddings**
+
+LM Studio classifies embedding models by matching the GGUF `arch` field against
+a hardcoded allowlist (`bert`, `nomic-bert`). Models built on other
+architectures — including Qwen2-based models like `nomic-embed-code` — are
+misclassified as LLMs. This affects `lms ls` output and the `/v1/embeddings`
+REST endpoint.
+
+**Fix (GGUF, v0.3.16+):** Open LM Studio → My Models, click the gear icon next
+to the model, set **Override Domain Type** → **Text Embedding**.
+
+> **macOS / Apple Silicon:** MLX format models are significantly faster on Apple
+> Silicon. However, LM Studio removed the domain type override for MLX in
+> v0.3.30+, so MLX embedding models cannot be reclassified. Use the GGUF
+> variant to retain the override option, or switch to Ollama
+> (`ordis/jina-embeddings-v2-base-code` or `qwen3-embedding:8b`).
+
 **Switching embedding models**
 
 Set `LUMEN_EMBED_MODEL` to a model from the supported table above. Each model
