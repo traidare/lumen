@@ -69,4 +69,3 @@ func XDGConfigDir() string {
 func DefaultConfigPath() string {
 	return filepath.Join(XDGConfigDir(), "lumen", "config.yaml")
 }
-
