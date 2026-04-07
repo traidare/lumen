@@ -26,7 +26,6 @@ import (
 
 	"github.com/ory/lumen/internal/config"
 	"github.com/ory/lumen/internal/embedder"
-	"github.com/ory/lumen/internal/git"
 	"github.com/ory/lumen/internal/index"
 	"github.com/spf13/cobra"
 )
@@ -123,37 +122,9 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	projectPath := pathFlag
-	if projectPath == "" {
-		if cwdFlag != "" {
-			projectPath = cwdFlag
-		} else {
-			projectPath, err = os.Getwd()
-			if err != nil {
-				return fmt.Errorf("get working directory: %w", err)
-			}
-		}
-	}
-	projectPath, err = filepath.Abs(projectPath)
+	indexRoot, projectPath, err := resolveIndexRoot(pathFlag, cwdFlag, cfg.Model)
 	if err != nil {
-		return fmt.Errorf("resolve path: %w", err)
-	}
-
-	// When --cwd and --path both given, cwd is the index root.
-	indexRoot := projectPath
-	if cwdFlag != "" {
-		abs, err := filepath.Abs(cwdFlag)
-		if err != nil {
-			return fmt.Errorf("resolve cwd: %w", err)
-		}
-		indexRoot = abs
-	}
-
-	// Normalize to git root, or fall back to ancestor index for non-git dirs.
-	if root, err := git.RepoRoot(indexRoot); err == nil {
-		indexRoot = root
-	} else if ancestor := findAncestorIndex(indexRoot, cfg.Model); ancestor != "" {
-		indexRoot = ancestor
+		return fmt.Errorf("resolve paths: %w", err)
 	}
 
 	tr.record("path resolution", indexRoot)
@@ -246,7 +217,10 @@ func finishSearch(
 		}
 	}
 
-	results, err := idx.Search(ctx, indexRoot, queryVec, fetchLimit, maxDistance, pathPrefix)
+	searchCtx, searchCancel := context.WithTimeout(ctx, defaultSearchTimeout)
+	defer searchCancel()
+
+	results, err := idx.Search(searchCtx, indexRoot, queryVec, fetchLimit, maxDistance, pathPrefix)
 	if err != nil {
 		return fmt.Errorf("search: %w", err)
 	}
