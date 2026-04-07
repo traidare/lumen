@@ -20,10 +20,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
-	"time"
-
-	"github.com/ory/lumen/internal/models"
 )
 
 const (
@@ -32,70 +28,6 @@ const (
 	// BackendLMStudio is the backend identifier for LM Studio.
 	BackendLMStudio = "lmstudio"
 )
-
-// Config holds the resolved configuration for the lumen process.
-type Config struct {
-	Model          string
-	Dims           int
-	CtxLength      int
-	MaxChunkTokens int
-	OllamaHost     string
-	Backend        string
-	LMStudioHost   string
-	FreshnessTTL   time.Duration
-	ReindexTimeout time.Duration
-}
-
-// Load reads configuration from environment variables and the model registry.
-func Load() (Config, error) {
-	backend := EnvOrDefault("LUMEN_BACKEND", BackendOllama)
-	if backend != BackendOllama && backend != BackendLMStudio {
-		return Config{}, fmt.Errorf("unknown backend %q: must be %q or %q", backend, BackendOllama, BackendLMStudio)
-	}
-
-	defaultModel := models.DefaultOllamaModel
-	if backend == BackendLMStudio {
-		defaultModel = models.DefaultLMStudioModel
-	}
-
-	model := EnvOrDefault("LUMEN_EMBED_MODEL", defaultModel)
-
-	overrideDims := EnvOrDefaultInt("LUMEN_EMBED_DIMS", 0)
-	overrideCtx := EnvOrDefaultInt("LUMEN_EMBED_CTX", 0)
-
-	specKey := model
-	if canonical, ok := models.ModelAliases[model]; ok {
-		specKey = canonical
-	}
-	spec, modelKnown := models.KnownModels[specKey]
-	if !modelKnown && overrideDims == 0 {
-		return Config{}, fmt.Errorf("unknown embedding model %q: set LUMEN_EMBED_DIMS to use an unlisted model", model)
-	}
-
-	dims := spec.Dims
-	ctxLength := spec.CtxLength
-
-	if overrideDims > 0 {
-		dims = overrideDims
-	}
-	if overrideCtx > 0 {
-		ctxLength = overrideCtx
-	} else if !modelKnown {
-		ctxLength = 8192
-	}
-
-	return Config{
-		Model:          model,
-		Dims:           dims,
-		CtxLength:      ctxLength,
-		MaxChunkTokens: EnvOrDefaultInt("LUMEN_MAX_CHUNK_TOKENS", 512),
-		OllamaHost:     EnvOrDefault("OLLAMA_HOST", "http://localhost:11434"),
-		Backend:        backend,
-		LMStudioHost:   EnvOrDefault("LM_STUDIO_HOST", "http://localhost:1234"),
-		FreshnessTTL:   EnvOrDefaultDuration("LUMEN_FRESHNESS_TTL", 60*time.Second),
-		ReindexTimeout: EnvOrDefaultDuration("LUMEN_REINDEX_TIMEOUT", 0),
-	}, nil
-}
 
 // DBPathForProject returns the SQLite database path for a given project,
 // derived from a SHA-256 hash of the project path, embedding model name, and
@@ -138,34 +70,3 @@ func DefaultConfigPath() string {
 	return filepath.Join(XDGConfigDir(), "lumen", "config.yaml")
 }
 
-// EnvOrDefault returns the value of the environment variable named by key,
-// or fallback if the variable is not set or empty.
-func EnvOrDefault(key, fallback string) string {
-	if val := os.Getenv(key); val != "" {
-		return val
-	}
-	return fallback
-}
-
-// EnvOrDefaultInt returns the integer value of the environment variable named
-// by key, or fallback if the variable is not set, empty, or not a valid integer.
-func EnvOrDefaultInt(key string, fallback int) int {
-	if val := os.Getenv(key); val != "" {
-		if n, err := strconv.Atoi(val); err == nil {
-			return n
-		}
-	}
-	return fallback
-}
-
-// EnvOrDefaultDuration returns the time.Duration value of the environment
-// variable named by key, or fallback if the variable is not set, empty, or
-// not a valid duration string (e.g. "30s", "1m").
-func EnvOrDefaultDuration(key string, fallback time.Duration) time.Duration {
-	if val := os.Getenv(key); val != "" {
-		if d, err := time.ParseDuration(val); err == nil {
-			return d
-		}
-	}
-	return fallback
-}
