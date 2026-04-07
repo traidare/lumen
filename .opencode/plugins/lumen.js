@@ -3,11 +3,7 @@ import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pluginRoot = path.resolve(__dirname, "../..");
-const runCommand = path.join(
-  pluginRoot,
-  "scripts",
-  process.platform === "win32" ? "run.cmd" : "run.sh",
-);
+const runCommand = path.join(pluginRoot, "scripts", "run.cmd");
 
 export const LumenPlugin = async () => {
   return {
@@ -19,7 +15,7 @@ export const LumenPlugin = async () => {
           command:
             process.platform === "win32"
               ? ["cmd", "/c", runCommand, "stdio"]
-              : ["sh", runCommand, "stdio"],
+              : [runCommand, "stdio"],
           enabled: true,
         };
       }
