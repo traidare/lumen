@@ -125,32 +125,35 @@ func sessionStartDirective(host, mcpName string) string {
 }
 
 func generateSessionContextInternalWithDirective(directive, cwd string, findDonor func(string, string) string, bgIndexer func(string)) string {
-	cfg, err := config.Load()
+	cfg, err := config.NewConfigService(config.DefaultConfigPath())
 	if err != nil {
 		return directive + " No index yet — auto-created on first call."
 	}
+	emb := newEmbedder(cfg)
+	modelName := emb.ModelName()
+	dims := cfg.ServerDims(0)
 
 	// Normalize cwd to the git repository root so the DB path matches what
 	// `lumen index` and the MCP handler use. For non-git directories, walk
 	// up to reuse an existing ancestor index.
 	if root, err := git.RepoRoot(cwd); err == nil {
 		cwd = root
-	} else if ancestor := findAncestorIndex(cwd, cfg.Model); ancestor != "" {
+	} else if ancestor := findAncestorIndex(cwd, modelName); ancestor != "" {
 		cwd = ancestor
 	}
 
-	dbPath := config.DBPathForProject(cwd, cfg.Model)
+	dbPath := config.DBPathForProject(cwd, modelName)
 	if _, err := os.Stat(dbPath); err != nil {
 		// No index yet — kick off background pre-warming so the first search
 		// in this session doesn't pay the full seed + embed cost synchronously.
 		bgIndexer(cwd)
-		if donorPath := findDonor(cwd, cfg.Model); donorPath != "" {
+		if donorPath := findDonor(cwd, modelName); donorPath != "" {
 			return directive + " Sibling worktree index found — indexing in background."
 		}
 		return directive + " No index yet — indexing in background."
 	}
 
-	s, err := store.New(dbPath, cfg.Dims)
+	s, err := store.New(dbPath, dims)
 	if err != nil {
 		return directive
 	}

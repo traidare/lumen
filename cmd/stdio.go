@@ -138,7 +138,7 @@ type indexerCache struct {
 	reindexing      map[string]bool // projects with an active background reindex goroutine
 	embedder        embedder.Embedder
 	model           string
-	cfg             config.Config
+	cfg             *config.ConfigService
 	freshnessTTL    time.Duration                                                                                                            // 0 means use defaultFreshnessTTL
 	reindexTimeout  time.Duration                                                                                                            // 0 means use defaultReindexTimeout
 	findDonorFunc   func(string, string) string                                                                                              // nil uses config.FindDonorIndex
@@ -398,7 +398,7 @@ func (ic *indexerCache) getOrCreate(projectPath string, preferredRoot string) (*
 		}
 	}
 
-	idx, err := index.NewIndexer(dbPath, ic.embedder, ic.cfg.MaxChunkTokens)
+	idx, err := index.NewIndexer(dbPath, ic.embedder, ic.cfg.MaxChunkTokens())
 	if err != nil {
 		return nil, "", "", fmt.Errorf("create indexer: %w", err)
 	}
@@ -894,11 +894,21 @@ func (ic *indexerCache) handleIndexStatus(_ context.Context, _ *mcp.CallToolRequ
 
 // handleHealthCheck pings the configured embedding service and reports status.
 func (ic *indexerCache) handleHealthCheck(ctx context.Context, _ *mcp.CallToolRequest, _ HealthCheckInput) (*mcp.CallToolResult, any, error) {
-	host := ic.cfg.OllamaHost
-	probeURL := host + "/api/tags"
-	if ic.cfg.Backend == config.BackendLMStudio {
-		host = ic.cfg.LMStudioHost
-		probeURL = host + "/v1/models"
+	servers := ic.cfg.Servers()
+	var backend, host, model, probeURL string
+	if len(servers) > 0 {
+		srv := servers[0]
+		backend = srv.Backend
+		host = srv.Host
+		model = srv.Model
+		probeURL = host + "/api/tags"
+		if backend == config.BackendLMStudio {
+			probeURL = host + "/v1/models"
+		}
+	} else {
+		backend = config.BackendOllama
+		host = "http://localhost:11434"
+		probeURL = host + "/api/tags"
 	}
 
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -906,23 +916,23 @@ func (ic *indexerCache) handleHealthCheck(ctx context.Context, _ *mcp.CallToolRe
 
 	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, probeURL, nil)
 	if err != nil {
-		return healthResult(ic.cfg.Backend, host, ic.cfg.Model, false,
+		return healthResult(backend, host, model, false,
 			fmt.Sprintf("failed to create request: %v", err)), nil, nil
 	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return healthResult(ic.cfg.Backend, host, ic.cfg.Model, false,
+		return healthResult(backend, host, model, false,
 			fmt.Sprintf("service unreachable: %v", err)), nil, nil
 	}
 	_ = resp.Body.Close()
 
 	if resp.StatusCode >= 500 {
-		return healthResult(ic.cfg.Backend, host, ic.cfg.Model, false,
+		return healthResult(backend, host, model, false,
 			fmt.Sprintf("service returned HTTP %d", resp.StatusCode)), nil, nil
 	}
 
-	return healthResult(ic.cfg.Backend, host, ic.cfg.Model, true, "service is healthy"), nil, nil
+	return healthResult(backend, host, model, true, "service is healthy"), nil, nil
 }
 
 func healthResult(backend, host, model string, reachable bool, message string) *mcp.CallToolResult {
@@ -1240,33 +1250,41 @@ func formatIndexStatus(out IndexStatusOutput) string {
 }
 
 func runStdio(_ *cobra.Command, _ []string) error {
-	cfg, err := config.Load()
+	cfg, err := config.NewConfigService(config.DefaultConfigPath())
 	if err != nil {
 		return err
 	}
-
-	emb, err := newEmbedder(cfg)
-	if err != nil {
-		return fmt.Errorf("create embedder: %w", err)
+	if err := cfg.Watch(); err != nil {
+		return fmt.Errorf("watch config: %w", err)
 	}
+	defer cfg.Stop()
+
+	emb := newEmbedder(cfg)
+	modelName := emb.ModelName()
 
 	logger, logFile := newDebugLogger()
 	if logFile != nil {
 		defer func() { _ = logFile.Close() }()
 	}
+
+	servers := cfg.Servers()
+	var backend string
+	if len(servers) > 0 {
+		backend = servers[0].Backend
+	}
 	logger.Info("lumen config",
-		"model", cfg.Model,
-		"backend", cfg.Backend,
-		"freshness_ttl", cfg.FreshnessTTL.String(),
+		"model", modelName,
+		"backend", backend,
+		"freshness_ttl", cfg.FreshnessTTL().String(),
 	)
 
 	closeCtx, closeFn := context.WithCancel(context.Background())
 	indexers := &indexerCache{
 		embedder:       emb,
-		model:          cfg.Model,
+		model:          modelName,
 		cfg:            cfg,
-		freshnessTTL:   cfg.FreshnessTTL,
-		reindexTimeout: cfg.ReindexTimeout,
+		freshnessTTL:   cfg.FreshnessTTL(),
+		reindexTimeout: cfg.ReindexTimeout(),
 		log:            logger,
 		closeCtx:       closeCtx,
 		closeFn:        closeFn,

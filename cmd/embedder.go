@@ -15,20 +15,11 @@
 package cmd
 
 import (
-	"fmt"
-
 	"github.com/ory/lumen/internal/config"
 	"github.com/ory/lumen/internal/embedder"
 )
 
-// newEmbedder creates an Embedder based on the configured backend.
-func newEmbedder(cfg config.Config) (embedder.Embedder, error) {
-	switch cfg.Backend {
-	case config.BackendOllama:
-		return embedder.NewOllama(cfg.Model, cfg.Dims, cfg.CtxLength, cfg.OllamaHost)
-	case config.BackendLMStudio:
-		return embedder.NewLMStudio(cfg.Model, cfg.Dims, cfg.LMStudioHost)
-	default:
-		return nil, fmt.Errorf("unknown backend %q", cfg.Backend)
-	}
+// newEmbedder creates a FailoverEmbedder from the given ConfigService.
+func newEmbedder(cfg *config.ConfigService) *embedder.FailoverEmbedder {
+	return embedder.NewFailoverEmbedder(cfg)
 }

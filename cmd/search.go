@@ -114,15 +114,17 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	}
 
 	// Span 1: path resolution
-	cfg, err := config.Load()
+	if err := applyModelFlag(cmd); err != nil {
+		return err
+	}
+	cfg, err := config.NewConfigService(config.DefaultConfigPath())
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	if err := applyModelFlag(cmd, &cfg); err != nil {
-		return err
-	}
+	emb := newEmbedder(cfg)
+	modelName := emb.ModelName()
 
-	indexRoot, projectPath, err := resolveIndexRoot(pathFlag, cwdFlag, cfg.Model)
+	indexRoot, projectPath, err := resolveIndexRoot(pathFlag, cwdFlag, modelName)
 	if err != nil {
 		return fmt.Errorf("resolve paths: %w", err)
 	}
@@ -130,16 +132,16 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	tr.record("path resolution", indexRoot)
 
 	// Span 2: indexer setup
-	dbPath := config.DBPathForProject(indexRoot, cfg.Model)
+	dbPath := config.DBPathForProject(indexRoot, modelName)
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		return fmt.Errorf("create db directory: %w", err)
 	}
-	idx, err := setupIndexer(&cfg, dbPath, nil)
+	idx, err := setupIndexer(cfg, emb, dbPath, nil)
 	if err != nil {
 		return fmt.Errorf("setup indexer: %w", err)
 	}
 	defer func() { _ = idx.Close() }()
-	tr.record("indexer setup", fmt.Sprintf("db opened, model %s", cfg.Model))
+	tr.record("indexer setup", fmt.Sprintf("db opened, model %s", modelName))
 
 	// Span 3: merkle + freshness (BuildTree happens inside EnsureFresh/Index)
 	ctx := context.Background()
@@ -150,10 +152,6 @@ func runSearch(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("force reindex: %w", err)
 		}
 		tr.record("merkle + freshness", fmt.Sprintf("reindexed %d files", s.IndexedFiles))
-		emb, err := newEmbedder(cfg)
-		if err != nil {
-			return fmt.Errorf("create embedder: %w", err)
-		}
 		return finishSearch(cmd, ctx, tr, idx, emb, query, indexRoot, projectPath, nResults, minScore, summary, maxLines, true, s.IndexedFiles)
 	}
 
@@ -168,11 +166,6 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		freshnessDetail = "index is fresh (no reindex)"
 	}
 	tr.record("merkle + freshness", freshnessDetail)
-
-	emb, err := newEmbedder(cfg)
-	if err != nil {
-		return fmt.Errorf("create embedder: %w", err)
-	}
 
 	indexedFiles := 0
 	if reindexed {

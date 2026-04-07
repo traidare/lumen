@@ -32,11 +32,12 @@ import (
 // the schema when generateSessionContextInternal opens it.
 func writeHookTestDB(t *testing.T, dbPath string, lastIndexedAt time.Time) {
 	t.Helper()
-	cfg, err := config.Load()
+	cfg, err := config.NewConfigService("")
 	if err != nil {
-		t.Fatalf("config.Load: %v", err)
+		t.Fatalf("NewConfigService: %v", err)
 	}
-	s, err := store.New(dbPath, cfg.Dims)
+	dims := cfg.ServerDims(0)
+	s, err := store.New(dbPath, dims)
 	if err != nil {
 		t.Fatalf("store.New: %v", err)
 	}
@@ -249,11 +250,12 @@ func TestGenerateSessionContextInternal_NoSpawnWhenFresh(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", tmpDir)
 
-	cfg, err := config.Load()
+	cfg, err := config.NewConfigService("")
 	if err != nil {
-		t.Fatalf("config.Load: %v", err)
+		t.Fatalf("NewConfigService: %v", err)
 	}
-	dbPath := config.DBPathForProject("/myproject", cfg.Model)
+	emb := newEmbedder(cfg)
+	dbPath := config.DBPathForProject("/myproject", emb.ModelName())
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -273,11 +275,12 @@ func TestGenerateSessionContextInternal_SpawnsWhenStale(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", tmpDir)
 
-	cfg, err := config.Load()
+	cfg, err := config.NewConfigService("")
 	if err != nil {
-		t.Fatalf("config.Load: %v", err)
+		t.Fatalf("NewConfigService: %v", err)
 	}
-	dbPath := config.DBPathForProject("/myproject", cfg.Model)
+	emb := newEmbedder(cfg)
+	dbPath := config.DBPathForProject("/myproject", emb.ModelName())
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -345,16 +348,17 @@ func TestGenerateSessionContextInternal_NormalizesToGitRoot(t *testing.T) {
 	}
 
 	// Create a DB for the git root so the hook finds it.
-	cfg, err := config.Load()
-	if err != nil {
-		t.Fatalf("config.Load: %v", err)
+	cfgSvc, cfgErr := config.NewConfigService("")
+	if cfgErr != nil {
+		t.Fatalf("NewConfigService: %v", cfgErr)
 	}
+	embSvc := newEmbedder(cfgSvc)
 	// Resolve symlinks to match what git rev-parse --show-toplevel returns.
 	resolvedRepo, err := filepath.EvalSymlinks(repoDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dbPath := config.DBPathForProject(resolvedRepo, cfg.Model)
+	dbPath := config.DBPathForProject(resolvedRepo, embSvc.ModelName())
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -392,11 +396,12 @@ func TestGenerateSessionContextInternal_NonGitUsesParentIndex(t *testing.T) {
 	}
 
 	// Create a DB for the parent directory.
-	cfg, cfgErr := config.Load()
+	cfgSvc, cfgErr := config.NewConfigService("")
 	if cfgErr != nil {
-		t.Fatalf("config.Load: %v", cfgErr)
+		t.Fatalf("NewConfigService: %v", cfgErr)
 	}
-	dbPath := config.DBPathForProject(resolvedParent, cfg.Model)
+	embSvc := newEmbedder(cfgSvc)
+	dbPath := config.DBPathForProject(resolvedParent, embSvc.ModelName())
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -123,13 +123,15 @@ func TestSearchCmd_FlagsRegistered(t *testing.T) {
 // Green: passing config.DBPathForProject(dir, model) must succeed.
 func TestSetupIndexer_DBPathVsDirectory(t *testing.T) {
 	dir := t.TempDir()
-	cfg, err := config.Load()
+	cfg, err := config.NewConfigService("")
 	if err != nil {
-		t.Fatalf("load config: %v", err)
+		t.Fatalf("NewConfigService: %v", err)
 	}
+	emb := newEmbedder(cfg)
+	modelName := emb.ModelName()
 
 	// RED: directory path → SQLite PRAGMA error (the pre-fix behaviour).
-	_, dirErr := setupIndexer(&cfg, dir, nil)
+	_, dirErr := setupIndexer(cfg, emb, dir, nil)
 	if dirErr == nil {
 		t.Fatal("expected error when passing a directory as the db path, got nil")
 	}
@@ -138,11 +140,11 @@ func TestSetupIndexer_DBPathVsDirectory(t *testing.T) {
 	}
 
 	// GREEN: proper db file path → no error.
-	dbPath := config.DBPathForProject(dir, cfg.Model)
+	dbPath := config.DBPathForProject(dir, modelName)
 	if mkErr := os.MkdirAll(filepath.Dir(dbPath), 0o755); mkErr != nil {
 		t.Fatalf("MkdirAll: %v", mkErr)
 	}
-	idx, err := setupIndexer(&cfg, dbPath, nil)
+	idx, err := setupIndexer(cfg, emb, dbPath, nil)
 	if err != nil {
 		t.Fatalf("setupIndexer with db path failed: %v", err)
 	}

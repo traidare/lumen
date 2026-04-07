@@ -70,6 +70,18 @@ func mustGetwd(t *testing.T) string {
 	return wd
 }
 
+// newTestConfigService returns a *config.ConfigService with the given
+// maxChunkTokens for use in unit tests that construct indexerCache directly.
+func newTestConfigService(t *testing.T, maxChunkTokens int) *config.ConfigService {
+	t.Helper()
+	t.Setenv("LUMEN_MAX_CHUNK_TOKENS", fmt.Sprintf("%d", maxChunkTokens))
+	svc, err := config.NewConfigService("")
+	if err != nil {
+		t.Fatalf("NewConfigService: %v", err)
+	}
+	return svc
+}
+
 // stubEmbedder satisfies embedder.Embedder for tests.
 type stubEmbedder struct{}
 
@@ -83,10 +95,10 @@ func (s *stubEmbedder) Embed(_ context.Context, texts []string) ([][]float32, er
 func (s *stubEmbedder) Dimensions() int   { return 4 }
 func (s *stubEmbedder) ModelName() string { return "stub" }
 
-func TestIndexerCache_ConcurrentReads(_ *testing.T) {
+func TestIndexerCache_ConcurrentReads(t *testing.T) {
 	ic := &indexerCache{
 		embedder: &stubEmbedder{},
-		cfg:      config.Config{MaxChunkTokens: 2048},
+		cfg:      newTestConfigService(t, 2048),
 		log:      discardLog,
 	}
 
@@ -232,7 +244,7 @@ func TestIndexerCache_GetOrCreate_ReusesParentIndex(t *testing.T) {
 	ic := &indexerCache{
 		embedder: &stubEmbedder{},
 		model:    model,
-		cfg:      config.Config{MaxChunkTokens: 512},
+		cfg:      newTestConfigService(t, 512),
 		log:      discardLog,
 	}
 
@@ -298,7 +310,7 @@ func TestIndexerCache_GetOrCreate_FastPathEffectiveRoot(t *testing.T) {
 	ic := &indexerCache{
 		embedder: &stubEmbedder{},
 		model:    model,
-		cfg:      config.Config{MaxChunkTokens: 512},
+		cfg:      newTestConfigService(t, 512),
 		log:      discardLog,
 	}
 
@@ -361,7 +373,7 @@ func TestIndexerCache_GetOrCreate_WorktreePathIgnoresPreferredRoot(t *testing.T)
 	ic := &indexerCache{
 		embedder: &stubEmbedder{},
 		model:    "stub",
-		cfg:      config.Config{MaxChunkTokens: 512},
+		cfg:      newTestConfigService(t, 512),
 		log:      discardLog,
 	}
 
@@ -393,7 +405,7 @@ func TestIndexerCache_GetOrCreate_PreferredRoot(t *testing.T) {
 		ic := &indexerCache{
 			embedder: &stubEmbedder{},
 			model:    "stub",
-			cfg:      config.Config{MaxChunkTokens: 512},
+			cfg:      newTestConfigService(t, 512),
 		}
 		// No DB exists at parentDir yet — should fall through to findEffectiveRoot(subDir)
 		// which returns subDir (no parent index found either).
@@ -411,7 +423,7 @@ func TestIndexerCache_GetOrCreate_PreferredRoot(t *testing.T) {
 		ic := &indexerCache{
 			embedder: &stubEmbedder{},
 			model:    "stub",
-			cfg:      config.Config{MaxChunkTokens: 512},
+			cfg:      newTestConfigService(t, 512),
 		}
 		// Pre-create the DB file at parentDir so the preferred root is adopted.
 		dbPath := config.DBPathForProject(parentDir, "stub")
@@ -959,7 +971,7 @@ func TestEnsureIndexed_SkipsWhenLockHeld(t *testing.T) {
 	ic := &indexerCache{
 		embedder:     &stubEmbedder{},
 		model:        "stub",
-		cfg:          config.Config{MaxChunkTokens: 512, FreshnessTTL: time.Minute},
+		cfg:          newTestConfigService(t, 512),
 		freshnessTTL: time.Minute,
 		log:          discardLog,
 	}
@@ -1094,7 +1106,7 @@ func TestGetOrCreate_PrePopulatesTTLFromRecentIndex(t *testing.T) {
 	ic := &indexerCache{
 		embedder:     &stubEmbedder{},
 		model:        "stub",
-		cfg:          config.Config{MaxChunkTokens: 512},
+		cfg:          newTestConfigService(t, 512),
 		freshnessTTL: 30 * time.Second,
 	}
 	idx, _, _, err := ic.getOrCreate(projectDir, "")
@@ -1128,7 +1140,7 @@ func TestGetOrCreate_DoesNotPrePopulateTTLFromOldIndex(t *testing.T) {
 	ic := &indexerCache{
 		embedder:     &stubEmbedder{},
 		model:        "stub",
-		cfg:          config.Config{MaxChunkTokens: 512},
+		cfg:          newTestConfigService(t, 512),
 		freshnessTTL: 30 * time.Second,
 	}
 	idx, _, _, err := ic.getOrCreate(projectDir, "")
@@ -1165,7 +1177,7 @@ func TestGetOrCreate_ReturnsSeedWarningWhenSeedFails(t *testing.T) {
 	ic := &indexerCache{
 		embedder:      &stubEmbedder{},
 		model:         "stub",
-		cfg:           config.Config{MaxChunkTokens: 512},
+		cfg:           newTestConfigService(t, 512),
 		findDonorFunc: func(_, _ string) string { return "/fake/donor.db" },
 		seedFunc: func(_, _ string) (bool, error) {
 			return false, fmt.Errorf("permission denied")
@@ -1228,7 +1240,7 @@ func TestEnsureIndexed_FreshnessTTL(t *testing.T) {
 	ic := &indexerCache{
 		embedder: &stubEmbedder{},
 		model:    "stub",
-		cfg:      config.Config{MaxChunkTokens: 512},
+		cfg:      newTestConfigService(t, 512),
 	}
 
 	projectDir := filepath.Join(tmpDir, "proj")

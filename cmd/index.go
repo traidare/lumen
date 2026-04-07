@@ -52,26 +52,30 @@ func runIndex(cmd *cobra.Command, args []string) error {
 		defer func() { _ = logFile.Close() }()
 	}
 
-	cfg, err := config.Load()
+	if err := applyModelFlag(cmd); err != nil {
+		return err
+	}
+
+	cfg, err := config.NewConfigService(config.DefaultConfigPath())
 	if err != nil {
 		return err
 	}
 
-	if err := applyModelFlag(cmd, &cfg); err != nil {
-		return err
-	}
+	emb := newEmbedder(cfg)
 
 	projectPath, err := filepath.Abs(args[0])
 	if err != nil {
 		return fmt.Errorf("resolve path: %w", err)
 	}
 
+	modelName := emb.ModelName()
+
 	// Normalize to the git repository root when inside a git repo so that
 	// indexing a subdirectory produces the same DB as indexing the repo root.
 	// For non-git directories, walk up to reuse an existing ancestor index.
 	if root, err := git.RepoRoot(projectPath); err == nil {
 		projectPath = root
-	} else if ancestor := findAncestorIndex(projectPath, cfg.Model); ancestor != "" {
+	} else if ancestor := findAncestorIndex(projectPath, modelName); ancestor != "" {
 		projectPath = ancestor
 	}
 
@@ -81,7 +85,7 @@ func runIndex(cmd *cobra.Command, args []string) error {
 	for _, repo := range git.DiscoverNestedGitRepos(projectPath) {
 		p := tui.NewProgress(os.Stderr)
 		p.Info(fmt.Sprintf("Indexing nested repo %s", repo))
-		stats, elapsed, skipped, err := runIndexer(cmd, &cfg, repo, p, logger)
+		stats, elapsed, skipped, err := runIndexer(cmd, cfg, emb, repo, p, logger)
 		switch {
 		case err != nil:
 			logger.Error("indexing nested repo failed", "repo", repo, "err", err)
@@ -98,9 +102,10 @@ func runIndex(cmd *cobra.Command, args []string) error {
 	}
 
 	p := tui.NewProgress(os.Stderr)
-	logger.Info("indexing started", "project", projectPath, "model", cfg.Model, "dims", cfg.Dims)
-	p.Info(fmt.Sprintf("Indexing %s (model: %s, dims: %d)", projectPath, cfg.Model, cfg.Dims))
-	stats, elapsed, skipped, err := runIndexer(cmd, &cfg, projectPath, p, logger)
+	dims := cfg.ServerDims(0)
+	logger.Info("indexing started", "project", projectPath, "model", modelName, "dims", dims)
+	p.Info(fmt.Sprintf("Indexing %s (model: %s, dims: %d)", projectPath, modelName, dims))
+	stats, elapsed, skipped, err := runIndexer(cmd, cfg, emb, projectPath, p, logger)
 	if err != nil {
 		logger.Error("indexing failed", "project", projectPath, "err", err)
 		return err
@@ -144,29 +149,22 @@ func runIndex(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func applyModelFlag(cmd *cobra.Command, cfg *config.Config) error {
+// applyModelFlag sets LUMEN_EMBED_MODEL so that NewConfigService picks it up.
+func applyModelFlag(cmd *cobra.Command) error {
 	m, _ := cmd.Flags().GetString("model")
 	if m == "" {
 		return nil
 	}
-	spec, ok := embedder.KnownModels[m]
-	if !ok {
+	if _, ok := embedder.KnownModels[m]; !ok {
 		return fmt.Errorf("unknown embedding model %q", m)
 	}
-	cfg.Model = m
-	cfg.Dims = spec.Dims
-	cfg.CtxLength = spec.CtxLength
+	_ = os.Setenv("LUMEN_EMBED_MODEL", m)
 	return nil
 }
 
 // setupIndexer receives dbPath so it is computed exactly once in runIndex.
-func setupIndexer(cfg *config.Config, dbPath string, logger *slog.Logger) (*index.Indexer, error) {
-	emb, err := newEmbedder(*cfg)
-	if err != nil {
-		return nil, fmt.Errorf("create embedder: %w", err)
-	}
-
-	idx, err := index.NewIndexer(dbPath, emb, cfg.MaxChunkTokens)
+func setupIndexer(cfg *config.ConfigService, emb *embedder.FailoverEmbedder, dbPath string, logger *slog.Logger) (*index.Indexer, error) {
+	idx, err := index.NewIndexer(dbPath, emb, cfg.MaxChunkTokens())
 	if err != nil {
 		return nil, fmt.Errorf("create indexer: %w", err)
 	}
@@ -177,8 +175,8 @@ func setupIndexer(cfg *config.Config, dbPath string, logger *slog.Logger) (*inde
 // runIndexer acquires the index lock for projectPath, runs performIndexing, and
 // returns the stats and elapsed time. skipped is true when another indexer holds
 // the lock. err is nil if indexing was cancelled by a signal.
-func runIndexer(cmd *cobra.Command, cfg *config.Config, projectPath string, p *tui.Progress, logger *slog.Logger) (stats index.Stats, elapsed time.Duration, skipped bool, err error) {
-	dbPath := config.DBPathForProject(projectPath, cfg.Model)
+func runIndexer(cmd *cobra.Command, cfg *config.ConfigService, emb *embedder.FailoverEmbedder, projectPath string, p *tui.Progress, logger *slog.Logger) (stats index.Stats, elapsed time.Duration, skipped bool, err error) {
+	dbPath := config.DBPathForProject(projectPath, emb.ModelName())
 	if mkErr := os.MkdirAll(filepath.Dir(dbPath), 0o755); mkErr != nil {
 		err = fmt.Errorf("create db directory: %w", mkErr)
 		return
@@ -201,7 +199,7 @@ func runIndexer(cmd *cobra.Command, cfg *config.Config, projectPath string, p *t
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	idx, setupErr := setupIndexer(cfg, dbPath, logger)
+	idx, setupErr := setupIndexer(cfg, emb, dbPath, logger)
 	if setupErr != nil {
 		err = setupErr
 		return
