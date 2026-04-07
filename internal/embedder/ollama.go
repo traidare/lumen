@@ -127,10 +127,10 @@ func (o *Ollama) embedBatch(ctx context.Context, texts []string) ([][]float32, e
 		_ = resp.Body.Close()
 
 		if resp.StatusCode >= 500 {
-			return retry.RetryableError(fmt.Errorf("server error: status %d", resp.StatusCode))
+			return retry.RetryableError(&EmbedError{StatusCode: resp.StatusCode, Message: string(body)})
 		}
 		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(body))
+			return &EmbedError{StatusCode: resp.StatusCode, Message: string(body)}
 		}
 		if readErr != nil {
 			return fmt.Errorf("reading response body: %w", readErr)

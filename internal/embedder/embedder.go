@@ -15,7 +15,20 @@
 // Package embedder defines the interface for generating embedding vectors from text.
 package embedder
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
+
+// EmbedError wraps an HTTP error from an embedding API.
+type EmbedError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *EmbedError) Error() string {
+	return fmt.Sprintf("embed error (HTTP %d): %s", e.StatusCode, e.Message)
+}
 
 // Embedder converts text chunks into vector embeddings.
 type Embedder interface {
