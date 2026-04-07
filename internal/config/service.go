@@ -37,13 +37,13 @@ type ConfigService struct {
 	stopCh     chan struct{}
 }
 
-func defaultsMap() map[string]interface{} {
-	return map[string]interface{}{
+func defaultsMap() map[string]any {
+	return map[string]any{
 		"max_chunk_tokens": 512,
 		"freshness_ttl":    "60s",
 		"reindex_timeout":  "0s",
 		"log_level":        "info",
-		"servers": []map[string]interface{}{
+		"servers": []map[string]any{
 			{
 				"backend": BackendOllama,
 				"host":    "http://localhost:11434",
@@ -84,7 +84,7 @@ func NewConfigService(configPath string) (*ConfigService, error) {
 
 // applyEnvOverrides reads legacy env vars and merges them into koanf.
 func applyEnvOverrides(k *koanf.Koanf) {
-	globals := make(map[string]interface{})
+	globals := make(map[string]any)
 
 	if v := os.Getenv("LUMEN_MAX_CHUNK_TOKENS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -155,14 +155,14 @@ func applyEnvOverrides(k *koanf.Koanf) {
 	}
 
 	// Re-marshal servers back into koanf
-	serverMaps := make([]map[string]interface{}, len(servers))
+	serverMaps := make([]map[string]any, len(servers))
 	for i, s := range servers {
-		serverMaps[i] = map[string]interface{}{
+		serverMaps[i] = map[string]any{
 			"backend": s.Backend, "host": s.Host, "model": s.Model,
 			"dims": s.Dims, "ctx_length": s.CtxLength, "min_score": s.MinScore,
 		}
 	}
-	_ = k.Load(confmap.Provider(map[string]interface{}{"servers": serverMaps}, "."), nil)
+	_ = k.Load(confmap.Provider(map[string]any{"servers": serverMaps}, "."), nil)
 }
 
 func (s *ConfigService) MaxChunkTokens() int {
