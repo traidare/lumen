@@ -32,7 +32,6 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/ory/lumen/internal/config"
 )
 
 // Local copies of tool I/O types for black-box E2E testing.
@@ -81,7 +80,10 @@ func TestMain(m *testing.M) {
 	defer os.Remove(bin)
 
 	// Check Ollama health.
-	ollamaHost := config.EnvOrDefault("OLLAMA_HOST", "http://localhost:11434")
+	ollamaHost := os.Getenv("OLLAMA_HOST")
+	if ollamaHost == "" {
+		ollamaHost = "http://localhost:11434"
+	}
 	resp, err := http.Get(ollamaHost)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Ollama is unreachable at %s: %v — skipping E2E tests\n", ollamaHost, err)
@@ -104,7 +106,10 @@ func startServerWithOpts(t *testing.T, opts *mcp.ClientOptions) *mcp.ClientSessi
 	t.Helper()
 
 	dataHome := t.TempDir()
-	ollamaHost := config.EnvOrDefault("OLLAMA_HOST", "http://localhost:11434")
+	ollamaHost := os.Getenv("OLLAMA_HOST")
+	if ollamaHost == "" {
+		ollamaHost = "http://localhost:11434"
+	}
 
 	cmd := exec.Command(serverBinary, "stdio")
 	cmd.Env = []string{
