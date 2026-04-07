@@ -127,7 +127,43 @@ const backgroundReindexMaxDuration = 10 * time.Minute
 type cacheEntry struct {
 	idx           *index.Indexer
 	effectiveRoot string
+	model         string
 	lastCheckedAt time.Time // zero means never checked
+}
+
+// cacheKey scopes cache entries by both project path and embedding model.
+func cacheKey(projectPath, model string) string {
+	return projectPath + "\x00" + model
+}
+
+func (ic *indexerCache) currentModel() string {
+	if ic.embedder == nil {
+		return ""
+	}
+	return ic.embedder.ModelName()
+}
+
+func (ic *indexerCache) cacheGet(projectPath, model string) (cacheEntry, bool) {
+	if entry, ok := ic.cache[cacheKey(projectPath, model)]; ok {
+		return entry, true
+	}
+	entry, ok := ic.cache[projectPath]
+	if !ok {
+		return cacheEntry{}, false
+	}
+	if entry.model != "" && entry.model != model {
+		return cacheEntry{}, false
+	}
+	return entry, true
+}
+
+func (ic *indexerCache) cacheSet(projectPath, model string, entry cacheEntry) {
+	if entry.model == "" {
+		entry.model = model
+	}
+	ic.cache[cacheKey(projectPath, model)] = entry
+	// Backward-compatible path-only alias used by existing tests and helper logic.
+	ic.cache[projectPath] = entry
 }
 
 // indexerCache manages one *index.Indexer per project path, creating them
@@ -137,10 +173,9 @@ type indexerCache struct {
 	cache           map[string]cacheEntry
 	reindexing      map[string]bool // projects with an active background reindex goroutine
 	embedder        embedder.Embedder
-	model           string
 	cfg             *config.ConfigService
-	freshnessTTL    time.Duration                                                                                                            // 0 means use defaultFreshnessTTL
-	reindexTimeout  time.Duration                                                                                                            // 0 means use defaultReindexTimeout
+	freshnessTTL    time.Duration                                                                                                            // override for tests; 0 reads from cfg, then defaultFreshnessTTL
+	reindexTimeout  time.Duration                                                                                                            // override for tests; 0 reads from cfg, then defaultReindexTimeout
 	findDonorFunc   func(string, string) string                                                                                              // nil uses config.FindDonorIndex
 	seedFunc        func(string, string) (bool, error)                                                                                       // nil uses index.SeedFromDonor
 	ensureFreshFunc func(ctx context.Context, idx *index.Indexer, projectDir string, progress index.ProgressFunc) (bool, index.Stats, error) // nil uses idx.EnsureFresh
@@ -148,6 +183,34 @@ type indexerCache struct {
 	wg              sync.WaitGroup     // tracks background reindex goroutines
 	closeCtx        context.Context    // cancelled by Close() to signal background goroutines
 	closeFn         context.CancelFunc // cancels closeCtx
+}
+
+// getFreshnessTTL returns the effective freshness TTL, checking the override
+// field first, then cfg, then the default constant.
+func (ic *indexerCache) getFreshnessTTL() time.Duration {
+	if ic.freshnessTTL != 0 {
+		return ic.freshnessTTL
+	}
+	if ic.cfg != nil {
+		if ttl := ic.cfg.FreshnessTTL(); ttl != 0 {
+			return ttl
+		}
+	}
+	return defaultFreshnessTTL
+}
+
+// getReindexTimeout returns the effective reindex timeout, checking the override
+// field first, then cfg, then the default constant.
+func (ic *indexerCache) getReindexTimeout() time.Duration {
+	if ic.reindexTimeout != 0 {
+		return ic.reindexTimeout
+	}
+	if ic.cfg != nil {
+		if t := ic.cfg.ReindexTimeout(); t != 0 {
+			return t
+		}
+	}
+	return defaultReindexTimeout
 }
 
 // logger returns ic.log, falling back to a discarding logger when the field
@@ -200,7 +263,11 @@ func (ic *indexerCache) Close() {
 // A candidate parent is skipped when the relative path from that parent to
 // path passes through a directory in merkle.SkipDirs (e.g. "testdata"). Such
 // a parent index would never contain path's files, so it is not useful.
-func (ic *indexerCache) findEffectiveRoot(path string) string {
+func (ic *indexerCache) findEffectiveRoot(path string, model ...string) string {
+	modelName := ic.currentModel()
+	if len(model) > 0 && model[0] != "" {
+		modelName = model[0]
+	}
 	// Cap the upward walk at the git repository root. This prevents lumen
 	// from adopting a large ancestor index (e.g. a GOPATH index) that
 	// happens to contain path as a subdirectory, which would cause
@@ -227,10 +294,10 @@ func (ic *indexerCache) findEffectiveRoot(path string) string {
 		}
 
 		if !pathCrossesSkipDir(candidate, path) {
-			if _, ok := ic.cache[candidate]; ok {
+			if _, ok := ic.cacheGet(candidate, modelName); ok {
 				return candidate
 			}
-			if _, err := os.Stat(config.DBPathForProject(candidate, ic.model)); err == nil {
+			if _, err := os.Stat(config.DBPathForProject(candidate, modelName)); err == nil {
 				return candidate
 			}
 		}
@@ -272,11 +339,15 @@ func pathCrossesSkipDir(root, sub string) bool {
 
 // hasIndex reports whether projectPath has an in-memory cached indexer or an
 // on-disk SQLite database. Callers must hold ic.mu.
-func (ic *indexerCache) hasIndex(projectPath string) bool {
-	if _, ok := ic.cache[projectPath]; ok {
+func (ic *indexerCache) hasIndex(projectPath string, model ...string) bool {
+	modelName := ic.currentModel()
+	if len(model) > 0 && model[0] != "" {
+		modelName = model[0]
+	}
+	if _, ok := ic.cacheGet(projectPath, modelName); ok {
 		return true
 	}
-	_, err := os.Stat(config.DBPathForProject(projectPath, ic.model))
+	_, err := os.Stat(config.DBPathForProject(projectPath, modelName))
 	return err == nil
 }
 
@@ -289,15 +360,21 @@ func (ic *indexerCache) hasIndex(projectPath string) bool {
 // bypassing the findEffectiveRoot walk. This lets callers pass the known
 // project root (e.g. cwd from Claude) so that sub-directory paths index the
 // whole project.
-func (ic *indexerCache) getOrCreate(projectPath string, preferredRoot string) (*index.Indexer, string, string, error) {
+func (ic *indexerCache) getOrCreate(projectPath string, preferredRoot string, model ...string) (*index.Indexer, string, string, error) {
+	modelName := ic.currentModel()
+	if len(model) > 0 && model[0] != "" {
+		modelName = model[0]
+	}
+
 	// Fast path: read lock for already-cached indexers.
 	ic.mu.RLock()
 	if ic.cache != nil {
-		if entry, ok := ic.cache[projectPath]; ok {
+		if entry, ok := ic.cacheGet(projectPath, modelName); ok {
 			ic.mu.RUnlock()
 			ic.logger().Debug("indexer cache hit",
 				"project_path", projectPath,
 				"effective_root", entry.effectiveRoot,
+				"model", modelName,
 			)
 			return entry.idx, entry.effectiveRoot, "", nil
 		}
@@ -312,7 +389,7 @@ func (ic *indexerCache) getOrCreate(projectPath string, preferredRoot string) (*
 		ic.cache = make(map[string]cacheEntry)
 	}
 	// Double-check: another goroutine may have created it while we waited.
-	if entry, ok := ic.cache[projectPath]; ok {
+	if entry, ok := ic.cacheGet(projectPath, modelName); ok {
 		return entry.idx, entry.effectiveRoot, "", nil
 	}
 
@@ -329,19 +406,19 @@ func (ic *indexerCache) getOrCreate(projectPath string, preferredRoot string) (*
 		// making every first search prohibitively slow. Once an index exists at
 		// the preferred root, subsequent searches reuse it and benefit from the
 		// shared project-wide index.
-		if _, err := os.Stat(config.DBPathForProject(clean, ic.model)); err == nil {
+		if _, err := os.Stat(config.DBPathForProject(clean, modelName)); err == nil {
 			effectiveRoot = clean
 		} else {
-			effectiveRoot = ic.findEffectiveRoot(projectPath)
+			effectiveRoot = ic.findEffectiveRoot(projectPath, modelName)
 		}
-	} else if git.IsWorktree(projectPath) && preferredRoot != "" && ic.hasIndex(preferredRoot) {
+	} else if git.IsWorktree(projectPath) && preferredRoot != "" && ic.hasIndex(preferredRoot, modelName) {
 		// projectPath is a worktree but the parent project (preferredRoot) is
 		// already indexed — reuse the parent index instead of creating a new
 		// one. This handles the case where a search path points into an
 		// internal .worktrees/ subdir of an already-indexed project.
 		effectiveRoot = filepath.Clean(preferredRoot)
 	} else {
-		effectiveRoot = ic.findEffectiveRoot(projectPath)
+		effectiveRoot = ic.findEffectiveRoot(projectPath, modelName)
 	}
 
 	// If a parent index is already cached, alias and return.
@@ -352,13 +429,13 @@ func (ic *indexerCache) getOrCreate(projectPath string, preferredRoot string) (*
 	// indexer with the wrong directory scope, causing EnsureFresh to scan one directory
 	// and write results into a different DB.
 	if effectiveRoot != projectPath {
-		if entry, ok := ic.cache[effectiveRoot]; ok && entry.effectiveRoot == effectiveRoot {
-			ic.cache[projectPath] = cacheEntry{idx: entry.idx, effectiveRoot: effectiveRoot}
+		if entry, ok := ic.cacheGet(effectiveRoot, modelName); ok && entry.effectiveRoot == effectiveRoot {
+			ic.cacheSet(projectPath, modelName, cacheEntry{idx: entry.idx, effectiveRoot: effectiveRoot, model: modelName})
 			return entry.idx, effectiveRoot, "", nil
 		}
 	}
 
-	dbPath := config.DBPathForProject(effectiveRoot, ic.model)
+	dbPath := config.DBPathForProject(effectiveRoot, modelName)
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		return nil, "", "", fmt.Errorf("create db directory: %w", err)
 	}
@@ -371,14 +448,14 @@ func (ic *indexerCache) getOrCreate(projectPath string, preferredRoot string) (*
 		ic.logger().Info("creating new index database",
 			"effective_root", effectiveRoot,
 			"db_path", dbPath,
-			"model", ic.model,
+			"model", modelName,
 			"index_version", config.IndexVersion,
 		)
 		findDonor := ic.findDonorFunc
 		if findDonor == nil {
 			findDonor = config.FindDonorIndex
 		}
-		if donorPath := findDonor(effectiveRoot, ic.model); donorPath != "" {
+		if donorPath := findDonor(effectiveRoot, modelName); donorPath != "" {
 			ic.logger().Info("seeding index from donor worktree",
 				"effective_root", effectiveRoot,
 				"donor_path", donorPath,
@@ -407,12 +484,9 @@ func (ic *indexerCache) getOrCreate(projectPath string, preferredRoot string) (*
 	// Pre-populate the freshness TTL if the index was recently stamped by
 	// background pre-warming (SessionStart hook). This avoids a redundant
 	// merkle walk on the very first search in a new session.
-	entry := cacheEntry{idx: idx, effectiveRoot: effectiveRoot}
+	entry := cacheEntry{idx: idx, effectiveRoot: effectiveRoot, model: modelName}
 	if lastAt, ok := idx.LastIndexedAt(); ok {
-		ttl := ic.freshnessTTL
-		if ttl == 0 {
-			ttl = defaultFreshnessTTL
-		}
+		ttl := ic.getFreshnessTTL()
 		if time.Since(lastAt) < ttl {
 			entry.lastCheckedAt = lastAt
 		}
@@ -423,13 +497,13 @@ func (ic *indexerCache) getOrCreate(projectPath string, preferredRoot string) (*
 		"effective_root", effectiveRoot,
 		"db_path", dbPath,
 		"new_index", isNewDB,
-		"model", ic.model,
+		"model", modelName,
 		"index_version", config.IndexVersion,
 	)
 
-	ic.cache[effectiveRoot] = entry
+	ic.cacheSet(effectiveRoot, modelName, entry)
 	if effectiveRoot != projectPath {
-		ic.cache[projectPath] = cacheEntry{idx: idx, effectiveRoot: effectiveRoot, lastCheckedAt: entry.lastCheckedAt}
+		ic.cacheSet(projectPath, modelName, cacheEntry{idx: idx, effectiveRoot: effectiveRoot, model: modelName, lastCheckedAt: entry.lastCheckedAt})
 	}
 	return idx, effectiveRoot, seedWarning, nil
 }
@@ -448,14 +522,15 @@ func (ic *indexerCache) handleSemanticSearch(ctx context.Context, req *mcp.CallT
 		"limit", input.Limit,
 	)
 
-	idx, effectiveRoot, seedWarning, err := ic.getOrCreate(input.Path, input.Cwd)
+	modelName := ic.currentModel()
+	idx, effectiveRoot, seedWarning, err := ic.getOrCreate(input.Path, input.Cwd, modelName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get indexer: %w", err)
 	}
 
 	progress := buildProgressFunc(ctx, req)
 
-	dbPath := config.DBPathForProject(effectiveRoot, ic.model)
+	dbPath := config.DBPathForProject(effectiveRoot, modelName)
 	out, err := ic.ensureIndexed(idx, input, effectiveRoot, dbPath, progress)
 	if err != nil {
 		return nil, nil, err
@@ -467,7 +542,7 @@ func (ic *indexerCache) handleSemanticSearch(ctx context.Context, req *mcp.CallT
 		return nil, nil, err
 	}
 
-	maxDistance := computeMaxDistance(input.MinScore, ic.model, ic.embedder.Dimensions())
+	maxDistance := computeMaxDistance(input.MinScore, modelName, ic.embedder.Dimensions())
 
 	// When searching a subdirectory, filter results to that prefix only.
 	var pathPrefix string
@@ -611,13 +686,18 @@ func buildProgressFunc(ctx context.Context, req *mcp.CallToolRequest) index.Prog
 	}
 }
 
-func (ic *indexerCache) ensureIndexed(idx *index.Indexer, input SemanticSearchInput, projectDir string, dbPath string, progress index.ProgressFunc) (SemanticSearchOutput, error) {
+func (ic *indexerCache) ensureIndexed(idx *index.Indexer, input SemanticSearchInput, projectDir string, dbPath string, progress index.ProgressFunc, model ...string) (SemanticSearchOutput, error) {
 	start := time.Now()
 	out := SemanticSearchOutput{}
+	modelName := ic.currentModel()
+	if len(model) > 0 && model[0] != "" {
+		modelName = model[0]
+	}
+	reindexKey := cacheKey(projectDir, modelName)
 
 	// Skip the merkle tree walk if we confirmed freshness recently. The walk
 	// costs 1-3s on large projects even when nothing changed.
-	if ic.recentlyChecked(projectDir) {
+	if ic.recentlyChecked(projectDir, modelName) {
 		ic.logger().Debug("freshness TTL hit, skipping merkle check",
 			"cwd", input.Cwd,
 			"effective_root", projectDir,
@@ -644,7 +724,7 @@ func (ic *indexerCache) ensureIndexed(idx *index.Indexer, input SemanticSearchIn
 	// project, skip spawning another one. This prevents redundant merkle
 	// tree walks and avoids macOS flock(2) same-process reentrance issues.
 	ic.mu.Lock()
-	if ic.reindexing != nil && ic.reindexing[projectDir] {
+	if ic.reindexing != nil && ic.reindexing[reindexKey] {
 		ic.mu.Unlock()
 		ic.logger().Debug("skipping reindex: in-process background goroutine already running", "project", projectDir)
 		out.StaleWarning = "Index is being updated in the background. Results may be incomplete or outdated. Use standard tools for the next 10 tool calls before trying semantic_search again."
@@ -653,7 +733,7 @@ func (ic *indexerCache) ensureIndexed(idx *index.Indexer, input SemanticSearchIn
 	if ic.reindexing == nil {
 		ic.reindexing = make(map[string]bool)
 	}
-	ic.reindexing[projectDir] = true
+	ic.reindexing[reindexKey] = true
 	ic.mu.Unlock()
 
 	// Run EnsureFresh in a goroutine with a 15s timeout. If reindexing
@@ -678,7 +758,7 @@ func (ic *indexerCache) ensureIndexed(idx *index.Indexer, input SemanticSearchIn
 		defer bgCancel()
 		defer func() {
 			ic.mu.Lock()
-			delete(ic.reindexing, projectDir)
+			delete(ic.reindexing, reindexKey)
 			ic.mu.Unlock()
 		}()
 
@@ -700,7 +780,7 @@ func (ic *indexerCache) ensureIndexed(idx *index.Indexer, input SemanticSearchIn
 		// already updated the index within freshnessTTL, trust the DB timestamp
 		// and skip the expensive merkle tree walk.
 		if lastAt, ok := idx.LastIndexedAt(); ok {
-			ttl := ic.freshnessTTL
+			ttl := ic.getFreshnessTTL()
 			if ttl == 0 {
 				ttl = defaultFreshnessTTL
 			}
@@ -709,7 +789,7 @@ func (ic *indexerCache) ensureIndexed(idx *index.Indexer, input SemanticSearchIn
 					"project", projectDir,
 					"last_indexed_at", lastAt,
 				)
-				ic.touchChecked(projectDir)
+				ic.touchChecked(projectDir, modelName)
 				done <- freshResult{}
 				return
 			}
@@ -725,15 +805,12 @@ func (ic *indexerCache) ensureIndexed(idx *index.Indexer, input SemanticSearchIn
 		if err != nil {
 			ic.logger().Warn("background reindex failed", "project", projectDir, "err", err)
 		} else {
-			ic.touchChecked(projectDir)
+			ic.touchChecked(projectDir, modelName)
 		}
 		done <- freshResult{reindexed: reindexed, stats: stats, err: err}
 	})
 
-	timeout := ic.reindexTimeout
-	if timeout == 0 {
-		timeout = defaultReindexTimeout
-	}
+	timeout := ic.getReindexTimeout()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
@@ -790,11 +867,15 @@ func (ic *indexerCache) ensureIndexed(idx *index.Indexer, input SemanticSearchIn
 
 // recentlyChecked reports whether the index for projectDir was confirmed fresh
 // within freshnessTTL. Reads under RLock so it is safe to call concurrently.
-func (ic *indexerCache) recentlyChecked(projectDir string) bool {
+func (ic *indexerCache) recentlyChecked(projectDir string, model ...string) bool {
+	modelName := ic.currentModel()
+	if len(model) > 0 && model[0] != "" {
+		modelName = model[0]
+	}
 	ic.mu.RLock()
-	entry, ok := ic.cache[projectDir]
+	entry, ok := ic.cacheGet(projectDir, modelName)
 	ic.mu.RUnlock()
-	ttl := ic.freshnessTTL
+	ttl := ic.getFreshnessTTL()
 	if ttl == 0 {
 		ttl = defaultFreshnessTTL
 	}
@@ -804,17 +885,21 @@ func (ic *indexerCache) recentlyChecked(projectDir string) bool {
 // touchChecked records the current time as the last freshness-check time for
 // projectDir. It updates both the projectDir entry and its effectiveRoot entry
 // (which may differ when projectDir is a subdirectory alias).
-func (ic *indexerCache) touchChecked(projectDir string) {
+func (ic *indexerCache) touchChecked(projectDir string, model ...string) {
+	modelName := ic.currentModel()
+	if len(model) > 0 && model[0] != "" {
+		modelName = model[0]
+	}
 	now := time.Now()
 	ic.mu.Lock()
 	defer ic.mu.Unlock()
-	if entry, ok := ic.cache[projectDir]; ok {
+	if entry, ok := ic.cacheGet(projectDir, modelName); ok {
 		entry.lastCheckedAt = now
-		ic.cache[projectDir] = entry
+		ic.cacheSet(projectDir, modelName, entry)
 		if entry.effectiveRoot != projectDir {
-			if root, ok := ic.cache[entry.effectiveRoot]; ok {
+			if root, ok := ic.cacheGet(entry.effectiveRoot, modelName); ok {
 				root.lastCheckedAt = now
-				ic.cache[entry.effectiveRoot] = root
+				ic.cacheSet(entry.effectiveRoot, modelName, root)
 			}
 		}
 	}
@@ -861,7 +946,8 @@ func (ic *indexerCache) handleIndexStatus(_ context.Context, _ *mcp.CallToolRequ
 		return nil, nil, fmt.Errorf("path is required (or provide cwd)")
 	}
 
-	idx, effectiveRoot, _, err := ic.getOrCreate(input.Path, input.Cwd)
+	modelName := ic.currentModel()
+	idx, effectiveRoot, _, err := ic.getOrCreate(input.Path, input.Cwd, modelName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get indexer: %w", err)
 	}
@@ -893,8 +979,16 @@ func (ic *indexerCache) handleIndexStatus(_ context.Context, _ *mcp.CallToolRequ
 }
 
 // handleHealthCheck pings the configured embedding service and reports status.
+// It checks the currently active server (after failover), not always server[0].
 func (ic *indexerCache) handleHealthCheck(ctx context.Context, _ *mcp.CallToolRequest, _ HealthCheckInput) (*mcp.CallToolResult, any, error) {
-	srv := ic.cfg.Servers()[0]
+	servers := ic.cfg.Servers()
+	idx := 0
+	if fe, ok := ic.embedder.(*embedder.FailoverEmbedder); ok {
+		if active := fe.ActiveServerIndex(); active >= 0 && active < len(servers) {
+			idx = active
+		}
+	}
+	srv := servers[idx]
 	backend := srv.Backend
 	host := srv.Host
 	model := srv.Model
@@ -1251,10 +1345,6 @@ func runStdio(_ *cobra.Command, _ []string) error {
 	}
 	defer cfg.Stop()
 
-	servers := cfg.Servers()
-	modelName := servers[0].Model
-	backend := servers[0].Backend
-
 	emb := newEmbedder(cfg)
 
 	logger, logFile := newDebugLogger()
@@ -1263,21 +1353,18 @@ func runStdio(_ *cobra.Command, _ []string) error {
 	}
 
 	logger.Info("lumen config",
-		"model", modelName,
-		"backend", backend,
+		"model", emb.ModelName(),
+		"backend", cfg.Servers()[0].Backend,
 		"freshness_ttl", cfg.FreshnessTTL().String(),
 	)
 
 	closeCtx, closeFn := context.WithCancel(context.Background())
 	indexers := &indexerCache{
-		embedder:       emb,
-		model:          modelName,
-		cfg:            cfg,
-		freshnessTTL:   cfg.FreshnessTTL(),
-		reindexTimeout: cfg.ReindexTimeout(),
-		log:            logger,
-		closeCtx:       closeCtx,
-		closeFn:        closeFn,
+		embedder: emb,
+		cfg:      cfg,
+		log:      logger,
+		closeCtx: closeCtx,
+		closeFn:  closeFn,
 	}
 	defer indexers.Close()
 

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/ory/lumen/internal/models"
 )
 
 func TestDefaults_NoFileNoEnv(t *testing.T) {
@@ -158,6 +160,39 @@ func TestHostConflict_BothSet(t *testing.T) {
 	}
 	if got := svc.Servers()[0].Host; got != "http://lms:2222" {
 		t.Errorf("Host = %q, want http://lms:2222 (lmstudio should win)", got)
+	}
+}
+
+func TestEnvBackendOnly_ResetsServerDefaults(t *testing.T) {
+	for _, k := range []string{"LUMEN_EMBED_DIMS", "LUMEN_EMBED_CTX", "LUMEN_EMBED_MODEL", "OLLAMA_HOST", "LM_STUDIO_HOST"} {
+		t.Setenv(k, "")
+	}
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.yaml")
+	_ = os.WriteFile(cfgFile, []byte(`
+servers:
+  - backend: ollama
+    host: http://custom-ollama:11434
+    model: all-minilm
+`), 0644)
+
+	// Backend override without explicit host/model must not keep stale
+	// ollama host/model from YAML.
+	t.Setenv("LUMEN_BACKEND", "lmstudio")
+
+	svc, err := NewConfigService(cfgFile)
+	if err != nil {
+		t.Fatalf("NewConfigService: %v", err)
+	}
+	s := svc.Servers()[0]
+	if s.Backend != BackendLMStudio {
+		t.Errorf("Backend = %q, want %q", s.Backend, BackendLMStudio)
+	}
+	if s.Host != "http://localhost:1234" {
+		t.Errorf("Host = %q, want %q", s.Host, "http://localhost:1234")
+	}
+	if s.Model != models.DefaultLMStudioModel {
+		t.Errorf("Model = %q, want %q", s.Model, models.DefaultLMStudioModel)
 	}
 }
 
@@ -319,5 +354,75 @@ func TestValidation_MissingModel(t *testing.T) {
 	_ = os.WriteFile(f, []byte(`servers: [{backend: ollama, host: "http://x:1"}]`), 0644)
 	if _, err := NewConfigService(f); err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestStop_Idempotent(t *testing.T) {
+	for _, k := range []string{"LUMEN_BACKEND", "LUMEN_EMBED_MODEL", "OLLAMA_HOST", "LM_STUDIO_HOST", "LUMEN_EMBED_DIMS", "LUMEN_EMBED_CTX"} {
+		t.Setenv(k, "")
+	}
+	dir := t.TempDir()
+	f := filepath.Join(dir, "config.yaml")
+	_ = os.WriteFile(f, []byte(`
+servers:
+  - backend: ollama
+    host: http://localhost:11434
+    model: ordis/jina-embeddings-v2-base-code
+`), 0644)
+	svc, err := NewConfigService(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Watch(); err != nil {
+		t.Fatal(err)
+	}
+	// Calling Stop() twice must not panic.
+	svc.Stop()
+	svc.Stop()
+}
+
+func TestModelAlias_Resolution(t *testing.T) {
+	for _, k := range []string{"LUMEN_BACKEND", "LUMEN_EMBED_MODEL", "OLLAMA_HOST", "LM_STUDIO_HOST", "LUMEN_EMBED_DIMS", "LUMEN_EMBED_CTX"} {
+		t.Setenv(k, "")
+	}
+	dir := t.TempDir()
+	f := filepath.Join(dir, "config.yaml")
+	// Use an alias name that maps to nomic-ai/nomic-embed-code-GGUF
+	_ = os.WriteFile(f, []byte(`
+servers:
+  - backend: lmstudio
+    host: http://localhost:1234
+    model: text-embedding-nomic-embed-code
+`), 0644)
+	svc, err := NewConfigService(f)
+	if err != nil {
+		t.Fatalf("NewConfigService should resolve alias: %v", err)
+	}
+	// Dims should resolve via the alias → canonical model → KnownModels
+	if got := svc.ServerDims(0); got != 3584 {
+		t.Errorf("ServerDims(0) = %d, want 3584 (via alias resolution)", got)
+	}
+	if got := svc.ServerCtxLength(0); got != 8192 {
+		t.Errorf("ServerCtxLength(0) = %d, want 8192 (via alias resolution)", got)
+	}
+	if got := svc.ServerMinScore(0); got != 0.15 {
+		t.Errorf("ServerMinScore(0) = %f, want 0.15 (via alias resolution)", got)
+	}
+}
+
+func TestWithModelOverride(t *testing.T) {
+	for _, k := range []string{"LUMEN_BACKEND", "LUMEN_EMBED_MODEL", "OLLAMA_HOST", "LM_STUDIO_HOST", "LUMEN_EMBED_DIMS", "LUMEN_EMBED_CTX"} {
+		t.Setenv(k, "")
+	}
+	svc, err := NewConfigService("", WithModelOverride("all-minilm"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	servers := svc.Servers()
+	if servers[0].Model != "all-minilm" {
+		t.Errorf("Model = %q, want %q", servers[0].Model, "all-minilm")
+	}
+	if got := svc.ServerDims(0); got != 384 {
+		t.Errorf("ServerDims(0) = %d, want 384", got)
 	}
 }

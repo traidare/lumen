@@ -30,11 +30,30 @@ type ServerConfig struct {
 
 // ConfigService wraps koanf and provides typed config access.
 type ConfigService struct {
-	k          *koanf.Koanf
-	mu         sync.RWMutex
-	configPath string
-	watcher    *fsnotify.Watcher
-	stopCh     chan struct{}
+	k             *koanf.Koanf
+	mu            sync.RWMutex
+	configPath    string
+	modelOverride string // set via WithModelOverride, applied after env vars
+	watcher       *fsnotify.Watcher
+	stopCh        chan struct{}
+	stopOnce      sync.Once
+}
+
+func defaultServerForBackend(backend string) ServerConfig {
+	switch backend {
+	case BackendLMStudio:
+		return ServerConfig{
+			Backend: BackendLMStudio,
+			Host:    "http://localhost:1234",
+			Model:   models.DefaultLMStudioModel,
+		}
+	default:
+		return ServerConfig{
+			Backend: BackendOllama,
+			Host:    "http://localhost:11434",
+			Model:   models.DefaultOllamaModel,
+		}
+	}
 }
 
 func defaultsMap() map[string]any {
@@ -53,9 +72,19 @@ func defaultsMap() map[string]any {
 	}
 }
 
+// Option configures a ConfigService.
+type Option func(*ConfigService)
+
+// WithModelOverride overrides the embedding model for servers[0], taking effect
+// after env var processing. Use this instead of os.Setenv to avoid mutating
+// global process state.
+func WithModelOverride(model string) Option {
+	return func(s *ConfigService) { s.modelOverride = model }
+}
+
 // NewConfigService creates a ConfigService. configPath is the YAML file path
 // (empty string means no file). Environment variables are always loaded.
-func NewConfigService(configPath string) (*ConfigService, error) {
+func NewConfigService(configPath string, opts ...Option) (*ConfigService, error) {
 	k := koanf.New(".")
 
 	// Layer 1: hardcoded defaults
@@ -76,6 +105,27 @@ func NewConfigService(configPath string) (*ConfigService, error) {
 	applyEnvOverrides(k)
 
 	svc := &ConfigService{k: k, configPath: configPath}
+	for _, opt := range opts {
+		opt(svc)
+	}
+
+	// Layer 4: programmatic overrides (e.g. CLI flags via WithModelOverride)
+	if svc.modelOverride != "" {
+		var servers []ServerConfig
+		_ = k.Unmarshal("servers", &servers)
+		if len(servers) > 0 {
+			servers[0].Model = svc.modelOverride
+			serverMaps := make([]map[string]any, len(servers))
+			for i, s := range servers {
+				serverMaps[i] = map[string]any{
+					"backend": s.Backend, "host": s.Host, "model": s.Model,
+					"dims": s.Dims, "ctx_length": s.CtxLength, "min_score": s.MinScore,
+				}
+			}
+			_ = k.Load(confmap.Provider(map[string]any{"servers": serverMaps}, "."), nil)
+		}
+	}
+
 	if err := svc.validate(); err != nil {
 		return nil, err
 	}
@@ -105,24 +155,15 @@ func applyEnvOverrides(k *koanf.Koanf) {
 	}
 
 	// Server env vars → merge into servers[0]
-	backend := os.Getenv("LUMEN_BACKEND")
+	backendEnv := os.Getenv("LUMEN_BACKEND")
 	model := os.Getenv("LUMEN_EMBED_MODEL")
 	dims := os.Getenv("LUMEN_EMBED_DIMS")
 	ctx := os.Getenv("LUMEN_EMBED_CTX")
-
-	if backend == "" {
-		backend = BackendOllama
-	}
-	var host string
-	switch backend {
-	case BackendLMStudio:
-		host = os.Getenv("LM_STUDIO_HOST")
-	default:
-		host = os.Getenv("OLLAMA_HOST")
-	}
+	ollamaHost := os.Getenv("OLLAMA_HOST")
+	lmStudioHost := os.Getenv("LM_STUDIO_HOST")
 
 	// Only apply if at least one server env var is explicitly set
-	hasOverride := os.Getenv("LUMEN_BACKEND") != "" || model != "" || host != "" || dims != "" || ctx != ""
+	hasOverride := backendEnv != "" || model != "" || dims != "" || ctx != "" || ollamaHost != "" || lmStudioHost != ""
 	if !hasOverride {
 		return
 	}
@@ -131,28 +172,49 @@ func applyEnvOverrides(k *koanf.Koanf) {
 	var servers []ServerConfig
 	_ = k.Unmarshal("servers", &servers)
 	if len(servers) == 0 {
-		servers = append(servers, ServerConfig{})
+		servers = append(servers, defaultServerForBackend(BackendOllama))
+	}
+	srv := servers[0]
+
+	// If backend is explicitly overridden, reset server[0] to backend-specific
+	// defaults first to avoid mixed config (e.g. lmstudio backend with Ollama host/model).
+	if backendEnv != "" {
+		srv = defaultServerForBackend(backendEnv)
 	}
 
-	if os.Getenv("LUMEN_BACKEND") != "" {
-		servers[0].Backend = backend
-	}
 	if model != "" {
-		servers[0].Model = model
+		srv.Model = model
 	}
-	if host != "" {
-		servers[0].Host = host
+
+	// Host env vars are backend-specific. If backend is explicitly set, apply
+	// the host var for that backend. Otherwise, apply host var for the current
+	// configured backend of server[0].
+	selectedBackend := srv.Backend
+	if selectedBackend == "" {
+		selectedBackend = BackendOllama
 	}
+	switch selectedBackend {
+	case BackendLMStudio:
+		if lmStudioHost != "" {
+			srv.Host = lmStudioHost
+		}
+	default:
+		if ollamaHost != "" {
+			srv.Host = ollamaHost
+		}
+	}
+
 	if dims != "" {
 		if n, err := strconv.Atoi(dims); err == nil {
-			servers[0].Dims = n
+			srv.Dims = n
 		}
 	}
 	if ctx != "" {
 		if n, err := strconv.Atoi(ctx); err == nil {
-			servers[0].CtxLength = n
+			srv.CtxLength = n
 		}
 	}
+	servers[0] = srv
 
 	// Re-marshal servers back into koanf
 	serverMaps := make([]map[string]any, len(servers))
@@ -211,6 +273,15 @@ func (s *ConfigService) serverAt(i int) (ServerConfig, bool) {
 	return servers[i], true
 }
 
+// resolveModel applies alias resolution for a model name, returning the
+// canonical name if an alias exists, or the original name otherwise.
+func resolveModel(model string) string {
+	if canonical, ok := models.ModelAliases[model]; ok {
+		return canonical
+	}
+	return model
+}
+
 // serverDims returns dims for server i without locking (caller must hold lock).
 func (s *ConfigService) serverDims(i int) int {
 	srv, ok := s.serverAt(i)
@@ -220,7 +291,8 @@ func (s *ConfigService) serverDims(i int) int {
 	if srv.Dims != 0 {
 		return srv.Dims
 	}
-	if spec, ok := models.KnownModels[srv.Model]; ok {
+	canonical := resolveModel(srv.Model)
+	if spec, ok := models.KnownModels[canonical]; ok {
 		return spec.Dims
 	}
 	return 0
@@ -242,7 +314,8 @@ func (s *ConfigService) ServerCtxLength(i int) int {
 	if srv.CtxLength != 0 {
 		return srv.CtxLength
 	}
-	if spec, ok := models.KnownModels[srv.Model]; ok {
+	canonical := resolveModel(srv.Model)
+	if spec, ok := models.KnownModels[canonical]; ok {
 		return spec.CtxLength
 	}
 	return 0
@@ -260,7 +333,8 @@ func (s *ConfigService) ServerMinScore(i int) float64 {
 	if srv.MinScore != 0 {
 		return srv.MinScore
 	}
-	if spec, ok := models.KnownModels[srv.Model]; ok && spec.MinScore != 0 {
+	canonical := resolveModel(srv.Model)
+	if spec, ok := models.KnownModels[canonical]; ok && spec.MinScore != 0 {
 		return spec.MinScore
 	}
 	return models.DimensionAwareMinScore(s.serverDims(i))
@@ -342,19 +416,20 @@ func (s *ConfigService) Watch() error {
 	return nil
 }
 
-// Stop stops the file watcher. Must be called from the same goroutine as Watch,
-// or after Watch returns.
+// Stop stops the file watcher. Safe to call multiple times.
 func (s *ConfigService) Stop() {
-	s.mu.RLock()
-	stopCh := s.stopCh
-	watcher := s.watcher
-	s.mu.RUnlock()
-	if stopCh != nil {
-		close(stopCh)
-	}
-	if watcher != nil {
-		_ = watcher.Close()
-	}
+	s.stopOnce.Do(func() {
+		s.mu.RLock()
+		stopCh := s.stopCh
+		watcher := s.watcher
+		s.mu.RUnlock()
+		if stopCh != nil {
+			close(stopCh)
+		}
+		if watcher != nil {
+			_ = watcher.Close()
+		}
+	})
 }
 
 func (s *ConfigService) watchLoop() {

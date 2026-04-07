@@ -18,11 +18,13 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"strconv"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -30,7 +32,9 @@ import (
 
 	"flag"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/ory/lumen/internal/config"
+	"github.com/ory/lumen/internal/embedder"
 	"github.com/ory/lumen/internal/index"
 	"github.com/ory/lumen/internal/indexlock"
 	"github.com/ory/lumen/internal/store"
@@ -62,6 +66,18 @@ func assertGolden(t *testing.T, goldenPath, got string) {
 	}
 }
 
+func mustTextResult(t *testing.T, result *mcp.CallToolResult) string {
+	t.Helper()
+	if result == nil || len(result.Content) == 0 {
+		t.Fatal("expected non-empty tool result content")
+	}
+	tc, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	return tc.Text
+}
+
 func mustGetwd(t *testing.T) string {
 	t.Helper()
 	wd, err := os.Getwd()
@@ -84,7 +100,9 @@ func newTestConfigService(t *testing.T, maxChunkTokens int) *config.ConfigServic
 }
 
 // stubEmbedder satisfies embedder.Embedder for tests.
-type stubEmbedder struct{}
+type stubEmbedder struct {
+	model string // defaults to "stub" when empty
+}
 
 func (s *stubEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
 	vecs := make([][]float32, len(texts))
@@ -93,8 +111,13 @@ func (s *stubEmbedder) Embed(_ context.Context, texts []string) ([][]float32, er
 	}
 	return vecs, nil
 }
-func (s *stubEmbedder) Dimensions() int   { return 4 }
-func (s *stubEmbedder) ModelName() string { return "stub" }
+func (s *stubEmbedder) Dimensions() int { return 4 }
+func (s *stubEmbedder) ModelName() string {
+	if s.model != "" {
+		return s.model
+	}
+	return "stub"
+}
 
 func TestIndexerCache_ConcurrentReads(t *testing.T) {
 	ic := &indexerCache{
@@ -120,8 +143,8 @@ func TestIndexerCache_FindEffectiveRoot(t *testing.T) {
 
 	t.Run("returns path when no parent exists", func(t *testing.T) {
 		ic := &indexerCache{
-			cache: make(map[string]cacheEntry),
-			model: model,
+			cache:    make(map[string]cacheEntry),
+			embedder: &stubEmbedder{model: model},
 		}
 		root := ic.findEffectiveRoot("/project/src/pkg")
 		if root != "/project/src/pkg" {
@@ -131,8 +154,8 @@ func TestIndexerCache_FindEffectiveRoot(t *testing.T) {
 
 	t.Run("returns cached parent", func(t *testing.T) {
 		ic := &indexerCache{
-			cache: map[string]cacheEntry{"/project": {idx: nil, effectiveRoot: "/project"}},
-			model: model,
+			cache:    map[string]cacheEntry{"/project": {idx: nil, effectiveRoot: "/project"}},
+			embedder: &stubEmbedder{model: model},
 		}
 		root := ic.findEffectiveRoot("/project/src/pkg")
 		if root != "/project" {
@@ -154,8 +177,8 @@ func TestIndexerCache_FindEffectiveRoot(t *testing.T) {
 		}
 
 		ic := &indexerCache{
-			cache: make(map[string]cacheEntry),
-			model: model,
+			cache:    make(map[string]cacheEntry),
+			embedder: &stubEmbedder{model: model},
 		}
 		root := ic.findEffectiveRoot("/project/src/pkg")
 		if root != "/project" {
@@ -177,8 +200,8 @@ func TestIndexerCache_FindEffectiveRoot(t *testing.T) {
 		}
 
 		ic := &indexerCache{
-			cache: make(map[string]cacheEntry),
-			model: model,
+			cache:    make(map[string]cacheEntry),
+			embedder: &stubEmbedder{model: model},
 		}
 		// "testdata" is in merkle.SkipDirs — the parent index would never
 		// contain these files, so findEffectiveRoot must return the path itself.
@@ -224,8 +247,8 @@ func TestIndexerCache_FindEffectiveRoot_GitBoundary(t *testing.T) {
 	}
 
 	ic := &indexerCache{
-		cache: make(map[string]cacheEntry),
-		model: model,
+		cache:    make(map[string]cacheEntry),
+		embedder: &stubEmbedder{model: model},
 	}
 	// No DB exists inside the git repo, so findEffectiveRoot should return the
 	// git root (not the ancestor DB above it, and not the subdir itself).
@@ -241,10 +264,8 @@ func TestIndexerCache_GetOrCreate_ReusesParentIndex(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", tmpDir)
 
-	const model = "stub"
 	ic := &indexerCache{
 		embedder: &stubEmbedder{},
-		model:    model,
 		cfg:      newTestConfigService(t, 512),
 		log:      discardLog,
 	}
@@ -307,10 +328,8 @@ func TestIndexerCache_GetOrCreate_FastPathEffectiveRoot(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", tmpDir)
 
-	const model = "stub"
 	ic := &indexerCache{
 		embedder: &stubEmbedder{},
-		model:    model,
 		cfg:      newTestConfigService(t, 512),
 		log:      discardLog,
 	}
@@ -340,6 +359,118 @@ func TestIndexerCache_GetOrCreate_FastPathEffectiveRoot(t *testing.T) {
 	}
 	if root != parentDir {
 		t.Fatalf("fast path returned wrong effectiveRoot: got %s, want %s", root, parentDir)
+	}
+}
+
+func TestIndexerCache_GetOrCreate_ModelChangeCreatesSeparateIndexer(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", tmpDir)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	emb := &stubEmbedder{model: "model-a"}
+	ic := &indexerCache{
+		embedder: emb,
+		cfg:      newTestConfigService(t, 512),
+		log:      discardLog,
+	}
+
+	idxA, rootA, _, err := ic.getOrCreate(projectDir, "")
+	if err != nil {
+		t.Fatalf("getOrCreate(model-a): %v", err)
+	}
+
+	// Simulate model change due to failover/hot-reload.
+	emb.model = "model-b"
+
+	idxB, rootB, _, err := ic.getOrCreate(projectDir, "")
+	if err != nil {
+		t.Fatalf("getOrCreate(model-b): %v", err)
+	}
+
+	if idxA == idxB {
+		t.Fatal("expected separate indexer instances for different models")
+	}
+	if rootA != rootB {
+		t.Fatalf("expected same effective root, got %q vs %q", rootA, rootB)
+	}
+
+	if _, err := os.Stat(config.DBPathForProject(rootA, "model-a")); err != nil {
+		t.Fatalf("expected model-a DB to exist: %v", err)
+	}
+	if _, err := os.Stat(config.DBPathForProject(rootB, "model-b")); err != nil {
+		t.Fatalf("expected model-b DB to exist: %v", err)
+	}
+
+	_ = idxA.Close()
+	_ = idxB.Close()
+}
+
+func TestHandleHealthCheck_UsesActiveFailoverServer(t *testing.T) {
+	for _, k := range []string{"LUMEN_BACKEND", "LUMEN_EMBED_MODEL", "LUMEN_EMBED_DIMS", "LUMEN_EMBED_CTX", "OLLAMA_HOST", "LM_STUDIO_HOST"} {
+		t.Setenv(k, "")
+	}
+
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.yaml")
+
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer down.Close()
+
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/":
+			_, _ = w.Write([]byte("ok"))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/tags":
+			_, _ = w.Write([]byte(`{"models":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/embed":
+			_, _ = w.Write([]byte(`{"embeddings":[[0.1,0.2,0.3]]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer up.Close()
+
+	if err := os.WriteFile(cfgFile, []byte(fmt.Sprintf(`
+servers:
+  - backend: ollama
+    host: %s
+    model: all-minilm
+    dims: 384
+  - backend: ollama
+    host: %s
+    model: all-minilm
+    dims: 384
+`, down.URL, up.URL)), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	svc, err := config.NewConfigService(cfgFile)
+	if err != nil {
+		t.Fatalf("NewConfigService: %v", err)
+	}
+	fe := embedder.NewFailoverEmbedder(svc)
+
+	if _, err := fe.Embed(context.Background(), []string{"hello"}); err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if got := fe.ActiveServerIndex(); got != 1 {
+		t.Fatalf("ActiveServerIndex = %d, want 1", got)
+	}
+
+	ic := &indexerCache{embedder: fe, cfg: svc}
+	result, _, err := ic.handleHealthCheck(context.Background(), &mcp.CallToolRequest{}, HealthCheckInput{})
+	if err != nil {
+		t.Fatalf("handleHealthCheck: %v", err)
+	}
+	text := mustTextResult(t, result)
+	if !strings.Contains(text, "Host: "+up.URL) {
+		t.Fatalf("expected health check to report active host %q, got: %s", up.URL, text)
 	}
 }
 
@@ -373,7 +504,6 @@ func TestIndexerCache_GetOrCreate_WorktreePathIgnoresPreferredRoot(t *testing.T)
 
 	ic := &indexerCache{
 		embedder: &stubEmbedder{},
-		model:    "stub",
 		cfg:      newTestConfigService(t, 512),
 		log:      discardLog,
 	}
@@ -405,7 +535,6 @@ func TestIndexerCache_GetOrCreate_PreferredRoot(t *testing.T) {
 	t.Run("no existing DB at preferredRoot falls back to projectPath", func(t *testing.T) {
 		ic := &indexerCache{
 			embedder: &stubEmbedder{},
-			model:    "stub",
 			cfg:      newTestConfigService(t, 512),
 		}
 		// No DB exists at parentDir yet — should fall through to findEffectiveRoot(subDir)
@@ -423,7 +552,6 @@ func TestIndexerCache_GetOrCreate_PreferredRoot(t *testing.T) {
 	t.Run("existing DB at preferredRoot is adopted", func(t *testing.T) {
 		ic := &indexerCache{
 			embedder: &stubEmbedder{},
-			model:    "stub",
 			cfg:      newTestConfigService(t, 512),
 		}
 		// Pre-create the DB file at parentDir so the preferred root is adopted.
@@ -969,12 +1097,11 @@ func TestEnsureIndexed_SkipsWhenLockHeld(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	t.Setenv("LUMEN_FRESHNESS_TTL", "60s")
 	ic := &indexerCache{
-		embedder:     &stubEmbedder{},
-		model:        "stub",
-		cfg:          newTestConfigService(t, 512),
-		freshnessTTL: time.Minute,
-		log:          discardLog,
+		embedder: &stubEmbedder{},
+		cfg:      newTestConfigService(t, 512),
+		log:      discardLog,
 	}
 
 	idx, effectiveRoot, _, err := ic.getOrCreate(projectPath, "")
@@ -982,7 +1109,7 @@ func TestEnsureIndexed_SkipsWhenLockHeld(t *testing.T) {
 		t.Fatalf("getOrCreate: %v", err)
 	}
 
-	dbPath := config.DBPathForProject(effectiveRoot, ic.model)
+	dbPath := config.DBPathForProject(effectiveRoot, ic.embedder.ModelName())
 	lockPath := indexlock.LockPathForDB(dbPath)
 
 	// Ensure the lock file's parent directory exists (getOrCreate creates the DB
@@ -1104,11 +1231,10 @@ func TestGetOrCreate_PrePopulatesTTLFromRecentIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	t.Setenv("LUMEN_FRESHNESS_TTL", "30s")
 	ic := &indexerCache{
-		embedder:     &stubEmbedder{},
-		model:        "stub",
-		cfg:          newTestConfigService(t, 512),
-		freshnessTTL: 30 * time.Second,
+		embedder: &stubEmbedder{},
+		cfg:      newTestConfigService(t, 512),
 	}
 	idx, _, _, err := ic.getOrCreate(projectDir, "")
 	if err != nil {
@@ -1138,11 +1264,10 @@ func TestGetOrCreate_DoesNotPrePopulateTTLFromOldIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	t.Setenv("LUMEN_FRESHNESS_TTL", "30s")
 	ic := &indexerCache{
-		embedder:     &stubEmbedder{},
-		model:        "stub",
-		cfg:          newTestConfigService(t, 512),
-		freshnessTTL: 30 * time.Second,
+		embedder: &stubEmbedder{},
+		cfg:      newTestConfigService(t, 512),
 	}
 	idx, _, _, err := ic.getOrCreate(projectDir, "")
 	if err != nil {
@@ -1177,7 +1302,6 @@ func TestGetOrCreate_ReturnsSeedWarningWhenSeedFails(t *testing.T) {
 
 	ic := &indexerCache{
 		embedder:      &stubEmbedder{},
-		model:         "stub",
 		cfg:           newTestConfigService(t, 512),
 		findDonorFunc: func(_, _ string) string { return "/fake/donor.db" },
 		seedFunc: func(_, _ string) (bool, error) {
@@ -1240,7 +1364,6 @@ func TestEnsureIndexed_FreshnessTTL(t *testing.T) {
 
 	ic := &indexerCache{
 		embedder: &stubEmbedder{},
-		model:    "stub",
 		cfg:      newTestConfigService(t, 512),
 	}
 
@@ -1256,13 +1379,13 @@ func TestEnsureIndexed_FreshnessTTL(t *testing.T) {
 	t.Cleanup(func() { _ = idx.Close() })
 
 	input := SemanticSearchInput{
-		Path:     projectDir,
-		Cwd:      projectDir,
-		Query:    "test",
+		Path:  projectDir,
+		Cwd:   projectDir,
+		Query: "test",
 		Limit: 8,
 	}
 
-	dbPath := config.DBPathForProject(effectiveRoot, ic.model)
+	dbPath := config.DBPathForProject(effectiveRoot, ic.embedder.ModelName())
 
 	// First call: no TTL entry yet — runs EnsureFresh and records lastCheckedAt.
 	_, err = ic.ensureIndexed(idx, input, effectiveRoot, dbPath, nil)

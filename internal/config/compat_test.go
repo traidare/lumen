@@ -87,3 +87,26 @@ func TestCompat_ModelFlagOverride(t *testing.T) {
 		t.Fatal("expected error for nonexistent model")
 	}
 }
+
+func TestCompat_BackendOnlyOverrideUsesBackendDefaults(t *testing.T) {
+	t.Setenv("LUMEN_BACKEND", "lmstudio")
+	t.Setenv("LUMEN_EMBED_MODEL", "")
+	t.Setenv("LM_STUDIO_HOST", "")
+	t.Setenv("OLLAMA_HOST", "")
+
+	svc, err := NewConfigService("")
+	if err != nil {
+		t.Fatalf("NewConfigService: %v", err)
+	}
+
+	s := svc.Servers()[0]
+	if s.Backend != BackendLMStudio {
+		t.Errorf("Backend = %q, want %q", s.Backend, BackendLMStudio)
+	}
+	if s.Host != "http://localhost:1234" {
+		t.Errorf("Host = %q, want %q", s.Host, "http://localhost:1234")
+	}
+	if s.Model != models.DefaultLMStudioModel {
+		t.Errorf("Model = %q, want %q", s.Model, models.DefaultLMStudioModel)
+	}
+}
