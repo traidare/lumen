@@ -262,17 +262,81 @@ valid.
 
 ## Testing Strategy
 
-- **ConfigService unit tests**: verify layering (defaults < file < env), verify
-  KnownModels fallback for dims/ctx_length/min_score, verify env var mapping to
-  server entries, verify host env var conflict resolution based on backend
-- **Validation tests**: missing required fields, unknown backend, unresolvable
-  dims, empty server list, invalid host format
-- **Hot reload tests**: verify file change triggers re-merge, verify env vars
-  still win after reload, verify invalid reload retains previous config
-- **FailoverEmbedder unit tests**: mock health endpoints, verify ordered
-  failover, verify 4xx does not trigger failover, verify all-exhausted error,
-  verify Dimensions()/ModelName() reflect active server
-- **Integration tests**: real koanf loading from temp YAML files with env var
-  overrides
-- **Backward compat tests**: verify zero-config defaults match current behavior,
-  verify legacy env vars produce identical config to today
+All work follows red/green TDD: write a failing test first, then implement to
+make it pass. Tests are grouped into three phases, each building on the previous.
+
+### Phase 1: ConfigService Unit Tests
+
+Tests in `internal/config/config_service_test.go`. Each test creates a
+`ConfigService` with controlled koanf state (in-memory providers, temp YAML
+files, env vars via `t.Setenv`). No network, no real servers.
+
+| Test | Red (what fails) | Green (what to implement) |
+|------|-------------------|---------------------------|
+| `TestDefaults_NoFileNoEnv` | `svc.MaxChunkTokens()` returns 0, `svc.Servers()` is empty | Hardcoded default provider with global defaults and single default server |
+| `TestYAMLOverridesDefaults` | Write temp YAML with `max_chunk_tokens: 1024` and two servers. `svc.MaxChunkTokens()` returns 512 (default) | YAML file provider loading |
+| `TestEnvOverridesYAML` | Set `LUMEN_MAX_CHUNK_TOKENS=2048` with YAML setting 1024. Returns 1024 | Env var provider layer on top of YAML |
+| `TestEnvServerMapping_Ollama` | Set `LUMEN_BACKEND=ollama`, `OLLAMA_HOST=http://x:1111`, `LUMEN_EMBED_MODEL=foo`. `svc.Servers()[0]` wrong | Env-to-server mapping logic |
+| `TestEnvServerMapping_LMStudio` | Set `LUMEN_BACKEND=lmstudio`, `LM_STUDIO_HOST=http://y:2222`. `svc.Servers()[0].Host` wrong | Backend-aware host var resolution |
+| `TestHostConflict_BothSet` | Set both `OLLAMA_HOST` and `LM_STUDIO_HOST` with `LUMEN_BACKEND=lmstudio`. Wrong host selected | Conflict resolution: backend determines which host var wins |
+| `TestDimsFallback_KnownModel` | Server has known model but no `dims` in config. `svc.ServerDims(0)` returns 0 | KnownModels fallback in accessor |
+| `TestDimsExplicit_OverridesKnown` | Server has known model and `dims: 1024` in config. Returns model default instead of 1024 | Config-first, KnownModels-second resolution |
+| `TestDimsUnresolvable_Error` | Server has unknown model, no `dims` in config. No error returned | Validation: unresolvable dims is config error |
+| `TestServersForModel_Filters` | Call `svc.ServersForModel("foo")` with mixed server list. Returns wrong indices | Filtering method |
+| `TestServersForModel_NoMatch` | Call with model not in any server. No error | Error on no matching servers |
+
+**Validation tests** (same file):
+
+| Test | Red | Green |
+|------|-----|-------|
+| `TestValidation_MissingBackend` | Config with server missing `backend` loads without error | Eager validation at load time |
+| `TestValidation_UnknownBackend` | Config with `backend: foo` loads without error | Backend value check |
+| `TestValidation_EmptyServerList` | Config with `servers: []` loads without error | Empty list rejection |
+| `TestValidation_InvalidHost` | Config with `host: not-a-url` loads without error | URL format validation |
+| `TestValidation_MissingModel` | Config with server missing `model` loads without error | Required field check |
+
+### Phase 2: Hot Reload Integration Tests
+
+Tests in `internal/config/config_reload_test.go`. These use real temp files on
+disk and real file watchers. No mocks for the file system.
+
+| Test | Red | Green |
+|------|-----|-------|
+| `TestReload_FileChange` | Write temp YAML, create `ConfigService` with watcher. Modify YAML (change `max_chunk_tokens`). Read value — still old | File watcher + re-merge implementation |
+| `TestReload_EnvStillWins` | Set env var, start watcher. Modify YAML to different value. Env var value lost | Re-merge preserves env layer on top |
+| `TestReload_InvalidRetainsPrevious` | Start with valid YAML. Overwrite with invalid YAML (missing required field). Config reverts to invalid | Validation on reload, retain previous on failure |
+| `TestReload_ServerListChange` | Start with 2 servers. Reload with 3 servers. `svc.Servers()` still returns 2 | Server list re-read after reload |
+| `TestReload_ConcurrentReads` | Spawn 100 goroutines reading config while triggering reloads. Race detector catches data race | RWMutex correctness (run with `-race`) |
+
+**Timing**: hot reload tests use a polling loop with short deadline (2s) rather
+than `time.Sleep`, to avoid flaky timing-dependent tests. The test reads the
+config value in a loop until it changes or the deadline expires.
+
+### Phase 3: FailoverEmbedder Integration Tests
+
+Tests in `internal/embedder/failover_test.go`. These spin up real
+`httptest.Server` instances to simulate Ollama and LM Studio backends. No mocks
+for HTTP — real TCP connections, real health probes.
+
+| Test | Red | Green |
+|------|-----|-------|
+| `TestFailover_FirstHealthy` | Create 3 test servers (down, up, up). `Embed()` hits server 2 instead of trying in order | Health probe + ordered selection |
+| `TestFailover_OnEmbedError` | Server 1 healthy, returns 500 on `Embed()`. Server 2 healthy. Second call still goes to server 1 | Failover on embed failure |
+| `TestFailover_4xxNoFailover` | Server 1 returns 400 on `Embed()`. `Embed()` tries server 2 | 4xx surfaced as config error, no failover |
+| `TestFailover_AllExhausted` | All servers down. `Embed()` returns generic error | Exhaustion error with details of what was tried |
+| `TestFailover_DimensionsReflectActive` | Server 1 (model A, 768d) down, server 2 (model B, 1024d) up. `Dimensions()` returns 768 | Dimensions()/ModelName() track active server |
+| `TestFailover_SingleServer` | One server, healthy. Works identically to non-failover path | No special-case code path for single server |
+| `TestFailover_LazyInit` | 3 servers, first is healthy. Only first server's embedder is instantiated | Lazy instantiation — verify other servers' embedders are nil |
+| `TestFailover_ReloadPicksUpNewServers` | Start with 1 server (down). Hot reload adds server 2 (up). Next `Embed()` still fails | FailoverEmbedder re-reads server list from ConfigService on failover |
+
+### Backward Compatibility Tests
+
+Tests in `internal/config/config_compat_test.go`. These verify that the new
+system produces identical behavior to the current env-var-only implementation
+for all existing usage patterns.
+
+| Test | Red | Green |
+|------|-----|-------|
+| `TestCompat_ZeroConfig` | New `ConfigService` with no file, no env vars. Compare output to current `config.Load()` defaults | Default provider matches current hardcoded defaults |
+| `TestCompat_AllEnvVars` | Set all current env vars. Compare new `ConfigService` output field-by-field to current `config.Load()` | Env mapping produces identical values |
+| `TestCompat_ModelFlagOverride` | Set `--model` flag equivalent. Compare behavior to current `applyModelFlag()` | ServersForModel produces same filtering |
