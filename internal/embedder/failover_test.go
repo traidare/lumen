@@ -258,11 +258,7 @@ func TestFailover_ReloadPicksUpNewServers(t *testing.T) {
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	// Reset checked flag to force re-read on next Embed
-	fe.mu.Lock()
-	fe.checked = false
-	fe.mu.Unlock()
-
+	// serversChanged() now detects the config reload automatically
 	_, err = fe.Embed(context.Background(), []string{"hello"})
 	if err != nil {
 		t.Fatalf("Embed after reload: %v", err)

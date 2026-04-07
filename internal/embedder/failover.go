@@ -29,12 +29,15 @@ const healthCheckTimeout = 5 * time.Second
 
 // FailoverEmbedder wraps multiple backend embedders with ordered health-check
 // failover. It probes servers on first use and fails over on transient errors.
+// When the ConfigService's server list changes (e.g. via hot reload), the
+// embedder re-initializes on the next Embed call.
 type FailoverEmbedder struct {
-	cfg     *config.ConfigService
-	mu      sync.Mutex
-	servers []serverEntry
-	active  int
-	checked bool
+	cfg           *config.ConfigService
+	mu            sync.Mutex
+	servers       []serverEntry
+	cachedConfigs []config.ServerConfig // snapshot at last init
+	active        int
+	checked       bool
 }
 
 type serverEntry struct {
@@ -88,7 +91,7 @@ func (f *FailoverEmbedder) ModelName() string {
 // errors (5xx, network) it fails over to the next healthy server.
 func (f *FailoverEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
 	f.mu.Lock()
-	if !f.checked {
+	if !f.checked || f.serversChanged() {
 		f.initServers()
 		f.checked = true
 	}
@@ -135,11 +138,34 @@ func (f *FailoverEmbedder) Embed(ctx context.Context, texts []string) ([][]float
 	}
 }
 
+// serversChanged returns true if the ConfigService's server list differs from
+// the cached server list (e.g. after a hot reload). Must be called with f.mu held.
+func (f *FailoverEmbedder) serversChanged() bool {
+	current := f.cfg.Servers()
+	if len(current) != len(f.servers) {
+		return true
+	}
+	for i, srv := range current {
+		// Compare key fields — if any differ, servers have changed.
+		if f.servers[i].emb == nil {
+			continue // not initialized yet, can't compare
+		}
+		cached := f.cachedConfigs[i]
+		if srv.Backend != cached.Backend || srv.Host != cached.Host || srv.Model != cached.Model {
+			return true
+		}
+	}
+	return false
+}
+
 // initServers initializes the server list and probes for the first healthy
 // server. Must be called with f.mu held.
 func (f *FailoverEmbedder) initServers() {
 	servers := f.cfg.Servers()
 	f.servers = make([]serverEntry, len(servers))
+	f.cachedConfigs = make([]config.ServerConfig, len(servers))
+	copy(f.cachedConfigs, servers)
+	f.active = -1
 	for i := range servers {
 		f.servers[i] = serverEntry{}
 	}
