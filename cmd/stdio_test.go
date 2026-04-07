@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -74,7 +75,7 @@ func mustGetwd(t *testing.T) string {
 // maxChunkTokens for use in unit tests that construct indexerCache directly.
 func newTestConfigService(t *testing.T, maxChunkTokens int) *config.ConfigService {
 	t.Helper()
-	t.Setenv("LUMEN_MAX_CHUNK_TOKENS", fmt.Sprintf("%d", maxChunkTokens))
+	t.Setenv("LUMEN_MAX_CHUNK_TOKENS", strconv.Itoa(maxChunkTokens))
 	svc, err := config.NewConfigService("")
 	if err != nil {
 		t.Fatalf("NewConfigService: %v", err)

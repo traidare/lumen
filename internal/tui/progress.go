@@ -33,8 +33,6 @@ type Progress struct {
 	writer     io.Writer
 	bar        *pterm.ProgressbarPrinter
 	info       pterm.PrefixPrinter
-	success    pterm.PrefixPrinter
-	errpr      pterm.PrefixPrinter
 	isTerminal bool
 }
 
@@ -54,8 +52,6 @@ func NewProgress(w io.Writer) *Progress {
 	return &Progress{
 		writer:     w,
 		info:       *pterm.Info.WithWriter(w),
-		success:    *pterm.Success.WithWriter(w),
-		errpr:      *pterm.Error.WithWriter(w),
 		isTerminal: isTerm,
 	}
 }
@@ -147,17 +143,3 @@ func (p *Progress) Info(msg string) {
 	p.info.Println(msg)
 }
 
-// Complete prints a success/completion message.
-func (p *Progress) Complete(msg string) {
-	p.success.Println(msg)
-}
-
-// UpToDate prints a message indicating the index is already current.
-func (p *Progress) UpToDate() {
-	p.info.Println("Index is already up to date.")
-}
-
-// Error prints an error-styled message.
-func (p *Progress) Error(msg string) {
-	p.errpr.Println(msg)
-}

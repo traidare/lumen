@@ -445,7 +445,7 @@ func (idx *Indexer) indexWithTree(ctx context.Context, projectDir, oldRootHash s
 		}
 
 		chunks = splitOversizedChunks(chunks, idx.maxChunkTokens)
-		chunks = mergeUndersizedChunks(chunks, minMergeTokens)
+		chunks = mergeUndersizedChunks(chunks)
 		// Re-split after merge: merging can combine chunks that together exceed
 		// the per-chunk limit, which would cause context-length errors in the
 		// embedder. A second pass keeps each text within the model's budget.

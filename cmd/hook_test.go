@@ -66,7 +66,7 @@ func TestGenerateSessionContext_NoIndex(t *testing.T) {
 	// Use the internal version with a no-op bgIndexer to avoid spawning the
 	// test binary as a background process (which would trigger a fork bomb:
 	// the spawned binary runs all tests, which spawn more binaries, etc.)
-	content := generateSessionContextInternal("lumen", "/nonexistent/path",
+	content := generateSessionContextInternal("/nonexistent/path",
 		func(_, _ string) string { return "" },
 		func(_ string) {},
 	)
@@ -225,7 +225,7 @@ func TestGenerateSessionContextInternal_SpawnsWhenNoDB(t *testing.T) {
 
 	t.Run("with donor", func(t *testing.T) {
 		var bgCwd string
-		generateSessionContextInternal("lumen", "/my/worktree",
+		generateSessionContextInternal("/my/worktree",
 			func(_, _ string) string { return "/some/donor.db" },
 			func(cwd string) { bgCwd = cwd },
 		)
@@ -236,7 +236,7 @@ func TestGenerateSessionContextInternal_SpawnsWhenNoDB(t *testing.T) {
 
 	t.Run("without donor", func(t *testing.T) {
 		var bgCwd string
-		generateSessionContextInternal("lumen", "/my/worktree",
+		generateSessionContextInternal("/my/worktree",
 			func(_, _ string) string { return "" },
 			func(cwd string) { bgCwd = cwd },
 		)
@@ -262,7 +262,7 @@ func TestGenerateSessionContextInternal_NoSpawnWhenFresh(t *testing.T) {
 	writeHookTestDB(t, dbPath, time.Now().Add(-30*time.Second))
 
 	called := false
-	generateSessionContextInternal("lumen", "/myproject",
+	generateSessionContextInternal("/myproject",
 		func(_, _ string) string { return "" },
 		func(_ string) { called = true },
 	)
@@ -287,7 +287,7 @@ func TestGenerateSessionContextInternal_SpawnsWhenStale(t *testing.T) {
 	writeHookTestDB(t, dbPath, time.Now().Add(-10*time.Minute))
 
 	called := false
-	generateSessionContextInternal("lumen", "/myproject",
+	generateSessionContextInternal("/myproject",
 		func(_, _ string) string { return "" },
 		func(_ string) { called = true },
 	)
@@ -300,7 +300,7 @@ func TestGenerateSessionContextInternal_MessageWithDonor(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", tmpDir)
 
-	result := generateSessionContextInternal("lumen", "/my/worktree",
+	result := generateSessionContextInternal("/my/worktree",
 		func(_, _ string) string { return "/some/donor.db" },
 		func(_ string) {},
 	)
@@ -313,7 +313,7 @@ func TestGenerateSessionContextInternal_MessageWithoutDonor(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", tmpDir)
 
-	result := generateSessionContextInternal("lumen", "/my/worktree",
+	result := generateSessionContextInternal("/my/worktree",
 		func(_, _ string) string { return "" },
 		func(_ string) {},
 	)
@@ -367,7 +367,7 @@ func TestGenerateSessionContextInternal_NormalizesToGitRoot(t *testing.T) {
 	// Pass a subdirectory as cwd — the hook should normalize to the git root
 	// and find the existing DB.
 	subDir := filepath.Join(resolvedRepo, "sub", "deep")
-	result := generateSessionContextInternal("lumen", subDir,
+	result := generateSessionContextInternal(subDir,
 		func(_, _ string) string { return "" },
 		func(_ string) {},
 	)
@@ -413,7 +413,7 @@ func TestGenerateSessionContextInternal_NonGitUsesParentIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result := generateSessionContextInternal("lumen", resolvedDeep,
+	result := generateSessionContextInternal(resolvedDeep,
 		func(_, _ string) string { return "" },
 		func(_ string) {},
 	)
@@ -426,7 +426,7 @@ func TestGenerateSessionContextInternal_NonGitUsesParentIndex(t *testing.T) {
 func TestHookOutputJSON(t *testing.T) {
 	// Use the internal version with a no-op bgIndexer — same fork-bomb reason
 	// as in TestGenerateSessionContext_NoIndex.
-	content := generateSessionContextInternal("lumen", "/nonexistent/path",
+	content := generateSessionContextInternal("/nonexistent/path",
 		func(_, _ string) string { return "" },
 		func(_ string) {},
 	)

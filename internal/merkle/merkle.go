@@ -44,21 +44,6 @@ func DefaultSkip(relPath string, isDir bool) bool {
 	return !strings.HasSuffix(base, ".go")
 }
 
-// MakeExtSkip returns a SkipFunc that passes only files whose extension is in exts.
-// Directories in SkipDirs are always skipped.
-func MakeExtSkip(exts []string) SkipFunc {
-	extSet := make(map[string]bool, len(exts))
-	for _, ext := range exts {
-		extSet[ext] = true
-	}
-	return func(relPath string, isDir bool) bool {
-		base := filepath.Base(relPath)
-		if isDir {
-			return SkipDirs[base]
-		}
-		return SkipFiles[base] || !extSet[filepath.Ext(relPath)]
-	}
-}
 
 const merkleWorkers = 8
 

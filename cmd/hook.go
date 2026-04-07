@@ -189,8 +189,8 @@ func generateSessionContextInternalWithDirective(directive, cwd string, findDono
 // generateSessionContextInternal is the testable core of generateSessionContext.
 // findDonor and bgIndexer are injected so tests can verify behaviour without
 // spawning real processes or requiring a live git repository.
-func generateSessionContextInternal(mcpName, cwd string, findDonor func(string, string) string, bgIndexer func(string)) string {
-	return generateSessionContextInternalWithDirective(sessionStartDirective(hookHostClaude, mcpName), cwd, findDonor, bgIndexer)
+func generateSessionContextInternal(cwd string, findDonor func(string, string) string, bgIndexer func(string)) string {
+	return generateSessionContextInternalWithDirective(sessionStartDirective(hookHostClaude, "lumen"), cwd, findDonor, bgIndexer)
 }
 
 func normalizeHookHost(host string) (string, error) {

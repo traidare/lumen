@@ -38,7 +38,6 @@ type FailoverEmbedder struct {
 }
 
 type serverEntry struct {
-	idx     int
 	emb     Embedder
 	healthy bool
 }
@@ -142,7 +141,7 @@ func (f *FailoverEmbedder) initServers() {
 	servers := f.cfg.Servers()
 	f.servers = make([]serverEntry, len(servers))
 	for i := range servers {
-		f.servers[i] = serverEntry{idx: i}
+		f.servers[i] = serverEntry{}
 	}
 	for i := range f.servers {
 		if f.probeHealth(i) {

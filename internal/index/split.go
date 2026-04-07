@@ -158,8 +158,8 @@ const minMergeTokens = 50
 // fall below minMergeTokens into a single chunk. Only "var", "const", and "type"
 // kinds are eligible; functions and methods are always left intact.
 // Token count is estimated as len(content)/4.
-func mergeUndersizedChunks(chunks []chunker.Chunk, minTokens int) []chunker.Chunk {
-	minChars := minTokens * 4
+func mergeUndersizedChunks(chunks []chunker.Chunk) []chunker.Chunk {
+	minChars := minMergeTokens * 4
 	result := make([]chunker.Chunk, 0, len(chunks))
 	i := 0
 	for i < len(chunks) {

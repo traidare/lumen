@@ -894,21 +894,13 @@ func (ic *indexerCache) handleIndexStatus(_ context.Context, _ *mcp.CallToolRequ
 
 // handleHealthCheck pings the configured embedding service and reports status.
 func (ic *indexerCache) handleHealthCheck(ctx context.Context, _ *mcp.CallToolRequest, _ HealthCheckInput) (*mcp.CallToolResult, any, error) {
-	servers := ic.cfg.Servers()
-	var backend, host, model, probeURL string
-	if len(servers) > 0 {
-		srv := servers[0]
-		backend = srv.Backend
-		host = srv.Host
-		model = srv.Model
-		probeURL = host + "/api/tags"
-		if backend == config.BackendLMStudio {
-			probeURL = host + "/v1/models"
-		}
-	} else {
-		backend = config.BackendOllama
-		host = "http://localhost:11434"
-		probeURL = host + "/api/tags"
+	srv := ic.cfg.Servers()[0]
+	backend := srv.Backend
+	host := srv.Host
+	model := srv.Model
+	probeURL := host + "/api/tags"
+	if backend == config.BackendLMStudio {
+		probeURL = host + "/v1/models"
 	}
 
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -1259,19 +1251,17 @@ func runStdio(_ *cobra.Command, _ []string) error {
 	}
 	defer cfg.Stop()
 
+	servers := cfg.Servers()
+	modelName := servers[0].Model
+	backend := servers[0].Backend
+
 	emb := newEmbedder(cfg)
-	modelName := emb.ModelName()
 
 	logger, logFile := newDebugLogger()
 	if logFile != nil {
 		defer func() { _ = logFile.Close() }()
 	}
 
-	servers := cfg.Servers()
-	var backend string
-	if len(servers) > 0 {
-		backend = servers[0].Backend
-	}
 	logger.Info("lumen config",
 		"model", modelName,
 		"backend", backend,

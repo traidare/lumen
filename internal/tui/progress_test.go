@@ -42,18 +42,6 @@ func TestProgress_StartStop(t *testing.T) {
 	}
 }
 
-func TestProgress_Complete(t *testing.T) {
-	var buf bytes.Buffer
-	p := NewProgress(&buf)
-
-	p.Complete("Done. Indexed 10 files, 50 chunks in 1.2s.")
-
-	output := buf.String()
-	if !strings.Contains(output, "Done") {
-		t.Errorf("expected output to contain 'Done', got %q", output)
-	}
-}
-
 func TestProgress_Info(t *testing.T) {
 	var buf bytes.Buffer
 	p := NewProgress(&buf)
@@ -63,18 +51,6 @@ func TestProgress_Info(t *testing.T) {
 	output := buf.String()
 	if !strings.Contains(output, "Indexing") {
 		t.Errorf("expected output to contain 'Indexing', got %q", output)
-	}
-}
-
-func TestProgress_UpToDate(t *testing.T) {
-	var buf bytes.Buffer
-	p := NewProgress(&buf)
-
-	p.UpToDate()
-
-	output := buf.String()
-	if !strings.Contains(output, "up to date") {
-		t.Errorf("expected output to contain 'up to date', got %q", output)
 	}
 }
 
@@ -107,14 +83,3 @@ func TestProgress_ZeroTotal(t *testing.T) {
 	p.Stop()
 }
 
-func TestProgress_Error(t *testing.T) {
-	var buf bytes.Buffer
-	p := NewProgress(&buf)
-
-	p.Error("something went wrong")
-
-	output := buf.String()
-	if !strings.Contains(output, "something went wrong") {
-		t.Errorf("expected output to contain error message, got %q", output)
-	}
-}
