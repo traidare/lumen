@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -43,5 +45,279 @@ func TestDefaults_NoFileNoEnv(t *testing.T) {
 	}
 	if s.Model != "ordis/jina-embeddings-v2-base-code" {
 		t.Errorf("Model = %q, want %q", s.Model, "ordis/jina-embeddings-v2-base-code")
+	}
+}
+
+func TestYAMLOverridesDefaults(t *testing.T) {
+	// Clear env vars that might interfere
+	for _, k := range []string{"LUMEN_BACKEND", "LUMEN_EMBED_MODEL", "OLLAMA_HOST", "LM_STUDIO_HOST", "LUMEN_EMBED_DIMS", "LUMEN_EMBED_CTX", "LUMEN_MAX_CHUNK_TOKENS"} {
+		t.Setenv(k, "")
+	}
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.yaml")
+	_ = os.WriteFile(cfgFile, []byte(`
+max_chunk_tokens: 1024
+log_level: debug
+servers:
+  - backend: lmstudio
+    host: http://myhost:5555
+    model: nomic-ai/nomic-embed-code-GGUF
+  - backend: ollama
+    host: http://other:11434
+    model: ordis/jina-embeddings-v2-base-code
+`), 0644)
+
+	svc, err := NewConfigService(cfgFile)
+	if err != nil {
+		t.Fatalf("NewConfigService: %v", err)
+	}
+	if got := svc.MaxChunkTokens(); got != 1024 {
+		t.Errorf("MaxChunkTokens() = %d, want 1024", got)
+	}
+	if got := svc.LogLevel(); got != "debug" {
+		t.Errorf("LogLevel() = %q, want %q", got, "debug")
+	}
+	servers := svc.Servers()
+	if len(servers) != 2 {
+		t.Fatalf("Servers() len = %d, want 2", len(servers))
+	}
+	if servers[0].Backend != "lmstudio" {
+		t.Errorf("server[0].Backend = %q, want %q", servers[0].Backend, "lmstudio")
+	}
+}
+
+func TestEnvOverridesYAML(t *testing.T) {
+	for _, k := range []string{"LUMEN_BACKEND", "LUMEN_EMBED_MODEL", "OLLAMA_HOST", "LM_STUDIO_HOST", "LUMEN_EMBED_DIMS", "LUMEN_EMBED_CTX"} {
+		t.Setenv(k, "")
+	}
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.yaml")
+	_ = os.WriteFile(cfgFile, []byte(`max_chunk_tokens: 1024
+servers:
+  - backend: ollama
+    host: http://localhost:11434
+    model: ordis/jina-embeddings-v2-base-code
+`), 0644)
+	t.Setenv("LUMEN_MAX_CHUNK_TOKENS", "2048")
+	svc, _ := NewConfigService(cfgFile)
+	if got := svc.MaxChunkTokens(); got != 2048 {
+		t.Errorf("MaxChunkTokens() = %d, want 2048", got)
+	}
+}
+
+func TestEnvServerMapping_Ollama(t *testing.T) {
+	for _, k := range []string{"LUMEN_EMBED_DIMS", "LUMEN_EMBED_CTX", "LM_STUDIO_HOST"} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("LUMEN_BACKEND", "ollama")
+	t.Setenv("OLLAMA_HOST", "http://custom:9999")
+	t.Setenv("LUMEN_EMBED_MODEL", "ordis/jina-embeddings-v2-base-code")
+	svc, err := NewConfigService("")
+	if err != nil {
+		t.Fatalf("NewConfigService: %v", err)
+	}
+	s := svc.Servers()[0]
+	if s.Backend != "ollama" {
+		t.Errorf("Backend = %q, want ollama", s.Backend)
+	}
+	if s.Host != "http://custom:9999" {
+		t.Errorf("Host = %q, want http://custom:9999", s.Host)
+	}
+	if s.Model != "ordis/jina-embeddings-v2-base-code" {
+		t.Errorf("Model = %q, want ordis/jina-embeddings-v2-base-code", s.Model)
+	}
+}
+
+func TestEnvServerMapping_LMStudio(t *testing.T) {
+	for _, k := range []string{"LUMEN_EMBED_DIMS", "LUMEN_EMBED_CTX", "OLLAMA_HOST"} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("LUMEN_BACKEND", "lmstudio")
+	t.Setenv("LM_STUDIO_HOST", "http://lms:2222")
+	t.Setenv("LUMEN_EMBED_MODEL", "nomic-ai/nomic-embed-code-GGUF")
+	svc, err := NewConfigService("")
+	if err != nil {
+		t.Fatalf("NewConfigService: %v", err)
+	}
+	if got := svc.Servers()[0].Host; got != "http://lms:2222" {
+		t.Errorf("Host = %q, want http://lms:2222", got)
+	}
+}
+
+func TestHostConflict_BothSet(t *testing.T) {
+	for _, k := range []string{"LUMEN_EMBED_DIMS", "LUMEN_EMBED_CTX"} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("LUMEN_BACKEND", "lmstudio")
+	t.Setenv("OLLAMA_HOST", "http://ollama:1111")
+	t.Setenv("LM_STUDIO_HOST", "http://lms:2222")
+	t.Setenv("LUMEN_EMBED_MODEL", "nomic-ai/nomic-embed-code-GGUF")
+	svc, err := NewConfigService("")
+	if err != nil {
+		t.Fatalf("NewConfigService: %v", err)
+	}
+	if got := svc.Servers()[0].Host; got != "http://lms:2222" {
+		t.Errorf("Host = %q, want http://lms:2222 (lmstudio should win)", got)
+	}
+}
+
+func TestDimsFallback_KnownModel(t *testing.T) {
+	for _, k := range []string{"LUMEN_BACKEND", "LUMEN_EMBED_MODEL", "OLLAMA_HOST", "LM_STUDIO_HOST", "LUMEN_EMBED_DIMS", "LUMEN_EMBED_CTX"} {
+		t.Setenv(k, "")
+	}
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.yaml")
+	_ = os.WriteFile(cfgFile, []byte(`
+servers:
+  - backend: ollama
+    host: http://localhost:11434
+    model: ordis/jina-embeddings-v2-base-code
+`), 0644)
+	svc, _ := NewConfigService(cfgFile)
+	if got := svc.ServerDims(0); got != 768 {
+		t.Errorf("ServerDims(0) = %d, want 768", got)
+	}
+	if got := svc.ServerMinScore(0); got != 0.35 {
+		t.Errorf("ServerMinScore(0) = %f, want 0.35", got)
+	}
+}
+
+func TestDimsExplicit_OverridesKnown(t *testing.T) {
+	for _, k := range []string{"LUMEN_BACKEND", "LUMEN_EMBED_MODEL", "OLLAMA_HOST", "LM_STUDIO_HOST", "LUMEN_EMBED_DIMS", "LUMEN_EMBED_CTX"} {
+		t.Setenv(k, "")
+	}
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.yaml")
+	_ = os.WriteFile(cfgFile, []byte(`
+servers:
+  - backend: ollama
+    host: http://localhost:11434
+    model: ordis/jina-embeddings-v2-base-code
+    dims: 1024
+    min_score: 0.5
+`), 0644)
+	svc, _ := NewConfigService(cfgFile)
+	if got := svc.ServerDims(0); got != 1024 {
+		t.Errorf("ServerDims(0) = %d, want 1024", got)
+	}
+	if got := svc.ServerMinScore(0); got != 0.5 {
+		t.Errorf("ServerMinScore(0) = %f, want 0.5", got)
+	}
+}
+
+func TestDimsUnresolvable_Error(t *testing.T) {
+	for _, k := range []string{"LUMEN_BACKEND", "LUMEN_EMBED_MODEL", "OLLAMA_HOST", "LM_STUDIO_HOST", "LUMEN_EMBED_DIMS", "LUMEN_EMBED_CTX"} {
+		t.Setenv(k, "")
+	}
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.yaml")
+	_ = os.WriteFile(cfgFile, []byte(`
+servers:
+  - backend: ollama
+    host: http://localhost:11434
+    model: totally-unknown-model
+`), 0644)
+	_, err := NewConfigService(cfgFile)
+	if err == nil {
+		t.Fatal("expected error for unresolvable dims")
+	}
+}
+
+func TestServersForModel_Filters(t *testing.T) {
+	for _, k := range []string{"LUMEN_BACKEND", "LUMEN_EMBED_MODEL", "OLLAMA_HOST", "LM_STUDIO_HOST", "LUMEN_EMBED_DIMS", "LUMEN_EMBED_CTX"} {
+		t.Setenv(k, "")
+	}
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.yaml")
+	_ = os.WriteFile(cfgFile, []byte(`
+servers:
+  - backend: ollama
+    host: http://a:11434
+    model: ordis/jina-embeddings-v2-base-code
+  - backend: lmstudio
+    host: http://b:1234
+    model: nomic-ai/nomic-embed-code-GGUF
+  - backend: ollama
+    host: http://c:11434
+    model: ordis/jina-embeddings-v2-base-code
+`), 0644)
+	svc, _ := NewConfigService(cfgFile)
+	indices, err := svc.ServersForModel("ordis/jina-embeddings-v2-base-code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(indices) != 2 || indices[0] != 0 || indices[1] != 2 {
+		t.Errorf("got %v, want [0, 2]", indices)
+	}
+}
+
+func TestServersForModel_NoMatch(t *testing.T) {
+	for _, k := range []string{"LUMEN_BACKEND", "LUMEN_EMBED_MODEL", "OLLAMA_HOST", "LM_STUDIO_HOST", "LUMEN_EMBED_DIMS", "LUMEN_EMBED_CTX"} {
+		t.Setenv(k, "")
+	}
+	svc, _ := NewConfigService("")
+	_, err := svc.ServersForModel("nonexistent-model")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestValidation_MissingBackend(t *testing.T) {
+	for _, k := range []string{"LUMEN_BACKEND", "LUMEN_EMBED_MODEL", "OLLAMA_HOST", "LM_STUDIO_HOST", "LUMEN_EMBED_DIMS", "LUMEN_EMBED_CTX"} {
+		t.Setenv(k, "")
+	}
+	dir := t.TempDir()
+	f := filepath.Join(dir, "config.yaml")
+	_ = os.WriteFile(f, []byte(`servers: [{host: "http://x:1", model: m}]`), 0644)
+	if _, err := NewConfigService(f); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestValidation_UnknownBackend(t *testing.T) {
+	for _, k := range []string{"LUMEN_BACKEND", "LUMEN_EMBED_MODEL", "OLLAMA_HOST", "LM_STUDIO_HOST", "LUMEN_EMBED_DIMS", "LUMEN_EMBED_CTX"} {
+		t.Setenv(k, "")
+	}
+	dir := t.TempDir()
+	f := filepath.Join(dir, "config.yaml")
+	_ = os.WriteFile(f, []byte(`servers: [{backend: foo, host: "http://x:1", model: m}]`), 0644)
+	if _, err := NewConfigService(f); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestValidation_EmptyServerList(t *testing.T) {
+	for _, k := range []string{"LUMEN_BACKEND", "LUMEN_EMBED_MODEL", "OLLAMA_HOST", "LM_STUDIO_HOST", "LUMEN_EMBED_DIMS", "LUMEN_EMBED_CTX"} {
+		t.Setenv(k, "")
+	}
+	dir := t.TempDir()
+	f := filepath.Join(dir, "config.yaml")
+	_ = os.WriteFile(f, []byte(`servers: []`), 0644)
+	if _, err := NewConfigService(f); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestValidation_InvalidHost(t *testing.T) {
+	for _, k := range []string{"LUMEN_BACKEND", "LUMEN_EMBED_MODEL", "OLLAMA_HOST", "LM_STUDIO_HOST", "LUMEN_EMBED_DIMS", "LUMEN_EMBED_CTX"} {
+		t.Setenv(k, "")
+	}
+	dir := t.TempDir()
+	f := filepath.Join(dir, "config.yaml")
+	_ = os.WriteFile(f, []byte(`servers: [{backend: ollama, host: not-a-url, model: ordis/jina-embeddings-v2-base-code}]`), 0644)
+	if _, err := NewConfigService(f); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestValidation_MissingModel(t *testing.T) {
+	for _, k := range []string{"LUMEN_BACKEND", "LUMEN_EMBED_MODEL", "OLLAMA_HOST", "LM_STUDIO_HOST", "LUMEN_EMBED_DIMS", "LUMEN_EMBED_CTX"} {
+		t.Setenv(k, "")
+	}
+	dir := t.TempDir()
+	f := filepath.Join(dir, "config.yaml")
+	_ = os.WriteFile(f, []byte(`servers: [{backend: ollama, host: "http://x:1"}]`), 0644)
+	if _, err := NewConfigService(f); err == nil {
+		t.Fatal("expected error")
 	}
 }
