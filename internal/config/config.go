@@ -23,7 +23,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/ory/lumen/internal/embedder"
+	"github.com/ory/lumen/internal/models"
 )
 
 const (
@@ -53,9 +53,9 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("unknown backend %q: must be %q or %q", backend, BackendOllama, BackendLMStudio)
 	}
 
-	defaultModel := embedder.DefaultOllamaModel
+	defaultModel := models.DefaultOllamaModel
 	if backend == BackendLMStudio {
-		defaultModel = embedder.DefaultLMStudioModel
+		defaultModel = models.DefaultLMStudioModel
 	}
 
 	model := EnvOrDefault("LUMEN_EMBED_MODEL", defaultModel)
@@ -64,10 +64,10 @@ func Load() (Config, error) {
 	overrideCtx := EnvOrDefaultInt("LUMEN_EMBED_CTX", 0)
 
 	specKey := model
-	if canonical, ok := embedder.ModelAliases[model]; ok {
+	if canonical, ok := models.ModelAliases[model]; ok {
 		specKey = canonical
 	}
-	spec, modelKnown := embedder.KnownModels[specKey]
+	spec, modelKnown := models.KnownModels[specKey]
 	if !modelKnown && overrideDims == 0 {
 		return Config{}, fmt.Errorf("unknown embedding model %q: set LUMEN_EMBED_DIMS to use an unlisted model", model)
 	}
