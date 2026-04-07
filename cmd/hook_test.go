@@ -110,6 +110,7 @@ func TestEvaluateToolCall_GrepAlwaysSuggests(t *testing.T) {
 			result := evaluateToolCall(input, "lumen")
 			if result == nil {
 				t.Fatal("expected suggestion for Grep, got nil")
+				return
 			}
 			if result.HookSpecificOutput.PermissionDecision != "" {
 				t.Errorf("expected no permissionDecision, got %q", result.HookSpecificOutput.PermissionDecision)
@@ -129,6 +130,7 @@ func TestEvaluateToolCall_GlobAlwaysSuggests(t *testing.T) {
 	result := evaluateToolCall(input, "lumen")
 	if result == nil {
 		t.Fatal("expected suggestion for Glob, got nil")
+		return
 	}
 	if result.HookSpecificOutput.PermissionDecision != "" {
 		t.Errorf("expected no permissionDecision, got %q", result.HookSpecificOutput.PermissionDecision)
@@ -161,6 +163,7 @@ func TestEvaluateToolCall_BashGrepSuggests(t *testing.T) {
 			result := evaluateToolCall(input, "lumen")
 			if result == nil {
 				t.Fatal("expected suggestion for bash grep, got nil")
+				return
 			}
 			if !strings.Contains(result.HookSpecificOutput.AdditionalContext, "mcp__lumen__semantic_search") {
 				t.Error("additionalContext should reference semantic_search tool")

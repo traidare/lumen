@@ -318,12 +318,18 @@ func (s *ConfigService) Watch() error {
 	if s.configPath == "" {
 		return nil
 	}
+	// Watch the directory (handles file renames/recreates).
+	// If the directory doesn't exist yet, skip watching — no config file
+	// can be present in a non-existent directory.
+	dir := filepath.Dir(s.configPath)
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return nil
+	}
+
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("creating watcher: %w", err)
 	}
-	// Watch the directory (handles file renames/recreates)
-	dir := filepath.Dir(s.configPath)
 	if err := w.Add(dir); err != nil {
 		_ = w.Close()
 		return fmt.Errorf("watching %s: %w", dir, err)
