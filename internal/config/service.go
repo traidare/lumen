@@ -199,7 +199,9 @@ func (s *ConfigService) Servers() []ServerConfig {
 	return servers
 }
 
-// serverAt returns the ServerConfig for index i without locking (caller must hold lock or be in init).
+// serverAt returns the ServerConfig for index i without acquiring s.mu.
+// Callers must either hold s.mu before calling this, or call it on a struct
+// that has not yet been shared with other goroutines.
 func (s *ConfigService) serverAt(i int) (ServerConfig, bool) {
 	var servers []ServerConfig
 	_ = s.k.Unmarshal("servers", &servers)
@@ -278,6 +280,10 @@ func (s *ConfigService) ServersForModel(model string) ([]int, error) {
 	return indices, nil
 }
 
+// validate checks the current configuration for correctness.
+// Must be called either on a ConfigService that has not yet been shared with
+// other goroutines, or on a temporary ConfigService (as in reload). Must not
+// be called while holding s.mu — it acquires RLock via Servers().
 func (s *ConfigService) validate() error {
 	servers := s.Servers()
 	if len(servers) == 0 {
@@ -319,22 +325,29 @@ func (s *ConfigService) Watch() error {
 	// Watch the directory (handles file renames/recreates)
 	dir := filepath.Dir(s.configPath)
 	if err := w.Add(dir); err != nil {
-		w.Close()
+		_ = w.Close()
 		return fmt.Errorf("watching %s: %w", dir, err)
 	}
+	s.mu.Lock()
 	s.stopCh = make(chan struct{})
 	s.watcher = w
+	s.mu.Unlock()
 	go s.watchLoop()
 	return nil
 }
 
-// Stop stops the file watcher.
+// Stop stops the file watcher. Must be called from the same goroutine as Watch,
+// or after Watch returns.
 func (s *ConfigService) Stop() {
-	if s.stopCh != nil {
-		close(s.stopCh)
+	s.mu.RLock()
+	stopCh := s.stopCh
+	watcher := s.watcher
+	s.mu.RUnlock()
+	if stopCh != nil {
+		close(stopCh)
 	}
-	if s.watcher != nil {
-		s.watcher.Close()
+	if watcher != nil {
+		_ = watcher.Close()
 	}
 }
 
