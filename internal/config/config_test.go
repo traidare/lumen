@@ -15,6 +15,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -189,6 +191,23 @@ func TestDBPathForProject(t *testing.T) {
 		p := DBPathForProject("/some/path", "model")
 		if !strings.HasSuffix(p, "index.db") {
 			t.Fatalf("expected path to end with index.db, got %q", p)
+		}
+	})
+}
+
+func TestXDGConfigDir(t *testing.T) {
+	t.Run("uses XDG_CONFIG_HOME when set", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", "/custom/config")
+		if got := XDGConfigDir(); got != "/custom/config" {
+			t.Errorf("XDGConfigDir() = %q, want %q", got, "/custom/config")
+		}
+	})
+	t.Run("falls back to ~/.config", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", "")
+		home, _ := os.UserHomeDir()
+		want := filepath.Join(home, ".config")
+		if got := XDGConfigDir(); got != want {
+			t.Errorf("XDGConfigDir() = %q, want %q", got, want)
 		}
 	})
 }

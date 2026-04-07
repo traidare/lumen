@@ -124,6 +124,20 @@ func XDGDataDir() string {
 	return filepath.Join(home, ".local", "share")
 }
 
+// XDGConfigDir returns XDG_CONFIG_HOME or ~/.config.
+func XDGConfigDir() string {
+	if d := os.Getenv("XDG_CONFIG_HOME"); d != "" {
+		return d
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config")
+}
+
+// DefaultConfigPath returns the default config file path.
+func DefaultConfigPath() string {
+	return filepath.Join(XDGConfigDir(), "lumen", "config.yaml")
+}
+
 // EnvOrDefault returns the value of the environment variable named by key,
 // or fallback if the variable is not set or empty.
 func EnvOrDefault(key, fallback string) string {
