@@ -157,6 +157,44 @@ assert_eq "pre-release version preserved" \
   "$(printf '{\n  ".": "0.0.1-alpha.4"\n}\n' | grep '"[.]"' | sed 's/.*"[^"]*"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/v\1/')"
 
 echo ""
+echo "=== stdio early-exit guard tests ==="
+
+# Mirrors the guard condition in run.sh: first arg == "stdio" → early exit
+stdio_guard_fires() {
+  [ "${1:-}" = "stdio" ]
+}
+
+if stdio_guard_fires "stdio"; then
+  ok "stdio guard fires for 'stdio' arg"
+else
+  fail "stdio guard fires for 'stdio' arg" "true" "false"
+fi
+
+if ! stdio_guard_fires "index"; then
+  ok "stdio guard does not fire for 'index' arg"
+else
+  fail "stdio guard does not fire for 'index' arg" "false" "true"
+fi
+
+if ! stdio_guard_fires "hook"; then
+  ok "stdio guard does not fire for 'hook' arg"
+else
+  fail "stdio guard does not fire for 'hook' arg" "false" "true"
+fi
+
+if ! stdio_guard_fires ""; then
+  ok "stdio guard does not fire for empty arg"
+else
+  fail "stdio guard does not fire for empty arg" "false" "true"
+fi
+
+if ! stdio_guard_fires; then
+  ok "stdio guard does not fire for no args"
+else
+  fail "stdio guard does not fire for no args" "false" "true"
+fi
+
+echo ""
 echo "=== summary ==="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
