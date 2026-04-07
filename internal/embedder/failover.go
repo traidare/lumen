@@ -147,9 +147,11 @@ func (f *FailoverEmbedder) initServers() {
 	for i := range f.servers {
 		if f.probeHealth(i) {
 			f.servers[i].healthy = true
-			f.active = i
-			_ = f.ensureEmbedder(i) // best-effort at init
-			return
+			if err := f.ensureEmbedder(i); err == nil {
+				f.active = i
+				return
+			}
+			// ensureEmbedder failed (e.g. unknown backend); try next server
 		}
 	}
 }
