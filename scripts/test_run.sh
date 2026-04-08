@@ -195,6 +195,80 @@ else
 fi
 
 echo ""
+echo "=== GitHub API tag parsing tests ==="
+
+# Simulates the sed command used in run.sh to extract tag_name from JSON
+parse_tag_from_json() {
+  echo "$1" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+}
+
+assert_eq "parse tag from typical API response" \
+  "v1.2.3" \
+  "$(parse_tag_from_json '  "tag_name": "v1.2.3",')"
+
+assert_eq "parse tag with pre-release suffix" \
+  "v0.0.1-alpha.4" \
+  "$(parse_tag_from_json '  "tag_name": "v0.0.1-alpha.4",')"
+
+assert_eq "parse tag with surrounding fields" \
+  "v2.0.0" \
+  "$(parse_tag_from_json '{"url":"https://...","tag_name": "v2.0.0","name":"v2.0.0"}')"
+
+assert_eq "empty on missing tag_name" \
+  "" \
+  "$(parse_tag_from_json '{"error": "Not Found"}')"
+
+assert_eq "empty on HTML error page" \
+  "" \
+  "$(parse_tag_from_json '<html><body>404</body></html>')"
+
+echo ""
+echo "=== fallback URL construction tests ==="
+
+# Given a resolved latest tag, verify the fallback URL is correct
+fallback_url() {
+  local repo="$1" tag="$2" os="$3" arch="$4"
+  local ver_no_v="${tag#v}"
+  local asset
+  case "$os" in
+    windows) asset="lumen-${ver_no_v}-${os}-${arch}.exe" ;;
+    *)       asset="lumen-${ver_no_v}-${os}-${arch}" ;;
+  esac
+  echo "https://github.com/${repo}/releases/download/${tag}/${asset}"
+}
+
+assert_eq "fallback URL for darwin arm64" \
+  "https://github.com/ory/lumen/releases/download/v0.0.31/lumen-0.0.31-darwin-arm64" \
+  "$(fallback_url "ory/lumen" "v0.0.31" "darwin" "arm64")"
+
+assert_eq "fallback URL for linux amd64" \
+  "https://github.com/ory/lumen/releases/download/v0.0.31/lumen-0.0.31-linux-amd64" \
+  "$(fallback_url "ory/lumen" "v0.0.31" "linux" "amd64")"
+
+assert_eq "fallback URL for windows amd64" \
+  "https://github.com/ory/lumen/releases/download/v0.0.31/lumen-0.0.31-windows-amd64.exe" \
+  "$(fallback_url "ory/lumen" "v0.0.31" "windows" "amd64")"
+
+echo ""
+echo "=== tag validation tests ==="
+
+# Mirrors the validation in run.sh: tag must be non-empty and match ^v[0-9]
+validate_tag() {
+  local tag="$1"
+  if [ -z "$tag" ] || ! echo "$tag" | grep -qE '^v[0-9]'; then
+    echo "invalid"
+  else
+    echo "valid"
+  fi
+}
+
+assert_eq "valid semver tag"    "valid"   "$(validate_tag "v1.2.3")"
+assert_eq "valid pre-release"   "valid"   "$(validate_tag "v0.0.1-alpha.4")"
+assert_eq "empty tag"           "invalid" "$(validate_tag "")"
+assert_eq "garbage tag"         "invalid" "$(validate_tag "not-a-version")"
+assert_eq "html fragment"       "invalid" "$(validate_tag "<html>")"
+
+echo ""
 echo "=== summary ==="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"

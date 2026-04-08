@@ -110,3 +110,33 @@ jobs:
           OLLAMA_HOST: http://localhost:11434
           LUMEN_EMBED_MODEL: all-minilm
           LUMEN_EMBED_DIMS: '384'
+
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    if: github.actor != 'release-please[bot]'
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Build
+        run: |
+          VERSION=$(grep -o '"[0-9][^"]*"' .release-please-manifest.json | tr -d '"' | head -1)
+          CGO_ENABLED=1 go build -tags=fts5 \
+            -ldflags="-X github.com/ory/lumen/cmd.buildVersion=$VERSION" \
+            -o bin/lumen .
+
+      - name: Assert semver version output
+        run: |
+          VER=$(bin/lumen version)
+          echo "Binary reported version: $VER"
+          echo "$VER" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]' \
+            || { echo "ERROR: version output does not match semver pattern"; exit 1; }
