@@ -1348,6 +1348,7 @@ func runStdio(_ *cobra.Command, _ []string) error {
 	emb := newEmbedder(cfg)
 
 	logger, logFile := newDebugLogger()
+	emb.SetLogger(logger)
 	if logFile != nil {
 		defer func() { _ = logFile.Close() }()
 	}

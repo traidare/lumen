@@ -14,10 +14,6 @@ case "$ARCH" in
   aarch64) ARCH="arm64" ;;
 esac
 
-# Environment defaults
-export LUMEN_BACKEND="${LUMEN_BACKEND:-ollama}"
-export LUMEN_EMBED_MODEL="${LUMEN_EMBED_MODEL:-ordis/jina-embeddings-v2-base-code}"
-
 # Find binary: check bin/ first, then goreleaser dist/ output, then download
 BINARY=""
 for candidate in \

@@ -122,6 +122,11 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 	emb := newEmbedder(cfg)
+	logger, logFile := newDebugLogger()
+	if logFile != nil {
+		defer func() { _ = logFile.Close() }()
+	}
+	emb.SetLogger(logger)
 	modelName := emb.ModelName()
 
 	indexRoot, projectPath, err := resolveIndexRoot(pathFlag, cwdFlag, modelName)

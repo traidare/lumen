@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -33,6 +34,7 @@ const healthCheckTimeout = 5 * time.Second
 // embedder re-initializes on the next Embed call.
 type FailoverEmbedder struct {
 	cfg           *config.ConfigService
+	logger        *slog.Logger
 	mu            sync.Mutex
 	servers       []serverEntry
 	cachedConfigs []config.ServerConfig // snapshot at last init
@@ -49,6 +51,11 @@ type serverEntry struct {
 // first Embed call.
 func NewFailoverEmbedder(cfg *config.ConfigService) *FailoverEmbedder {
 	return &FailoverEmbedder{cfg: cfg, active: -1}
+}
+
+// SetLogger attaches a logger to the embedder for structured diagnostic output.
+func (f *FailoverEmbedder) SetLogger(l *slog.Logger) {
+	f.logger = l
 }
 
 // ActiveServerIndex returns the index of the currently active server, or -1
@@ -128,6 +135,9 @@ func (f *FailoverEmbedder) Embed(ctx context.Context, texts []string) ([][]float
 			f.mu.Unlock()
 			return nil, fmt.Errorf("all embedding servers exhausted after failover: last error: %w", err)
 		}
+		if f.logger != nil {
+			f.logger.Warn("embedding server failed, trying next", "failed", active, "next", next, "error", err)
+		}
 		f.active = next
 		if err := f.ensureEmbedder(next); err != nil {
 			f.mu.Unlock()
@@ -169,15 +179,25 @@ func (f *FailoverEmbedder) initServers() {
 	for i := range servers {
 		f.servers[i] = serverEntry{}
 	}
+	if f.logger != nil {
+		f.logger.Info("probing embedding servers", "count", len(servers))
+	}
 	for i := range f.servers {
 		if f.probeHealth(i) {
 			f.servers[i].healthy = true
 			if err := f.ensureEmbedder(i); err == nil {
 				f.active = i
+				if f.logger != nil {
+					srv := servers[i]
+					f.logger.Info("selected embedding server", "server", i, "backend", srv.Backend, "host", srv.Host, "model", srv.Model)
+				}
 				return
 			}
 			// ensureEmbedder failed (e.g. unknown backend); try next server
 		}
+	}
+	if f.logger != nil {
+		f.logger.Warn("no healthy embedding server found")
 	}
 }
 
@@ -210,10 +230,19 @@ func (f *FailoverEmbedder) probeHealth(i int) bool {
 	client := &http.Client{Timeout: healthCheckTimeout}
 	resp, err := client.Get(endpoint)
 	if err != nil {
+		if f.logger != nil {
+			f.logger.Warn("health probe failed", "server", i, "backend", srv.Backend, "host", srv.Host, "error", err)
+		}
 		return false
 	}
 	defer func() { _ = resp.Body.Close() }()
-	return resp.StatusCode == http.StatusOK
+	if resp.StatusCode != http.StatusOK {
+		if f.logger != nil {
+			f.logger.Warn("health probe non-200", "server", i, "backend", srv.Backend, "host", srv.Host, "status", resp.StatusCode)
+		}
+		return false
+	}
+	return true
 }
 
 // ensureEmbedder lazily initializes the backend embedder for server i.

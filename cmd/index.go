@@ -62,6 +62,7 @@ func runIndex(cmd *cobra.Command, args []string) error {
 	}
 
 	emb := newEmbedder(cfg)
+	emb.SetLogger(logger)
 
 	projectPath, err := filepath.Abs(args[0])
 	if err != nil {
@@ -155,7 +156,11 @@ func applyModelFlag(cmd *cobra.Command) error {
 	if m == "" {
 		return nil
 	}
-	if _, ok := embedder.KnownModels[m]; !ok {
+	canonical := m
+	if c, ok := embedder.ModelAliases[m]; ok {
+		canonical = c
+	}
+	if _, ok := embedder.KnownModels[canonical]; !ok {
 		return fmt.Errorf("unknown embedding model %q", m)
 	}
 	_ = os.Setenv("LUMEN_EMBED_MODEL", m)

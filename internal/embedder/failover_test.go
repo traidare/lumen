@@ -15,12 +15,15 @@
 package embedder
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -262,5 +265,210 @@ func TestFailover_ReloadPicksUpNewServers(t *testing.T) {
 	_, err = fe.Embed(context.Background(), []string{"hello"})
 	if err != nil {
 		t.Fatalf("Embed after reload: %v", err)
+	}
+}
+
+func newTestLMStudioServer(t *testing.T, healthy bool, embedStatus int) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/v1/models":
+			if healthy {
+				w.WriteHeader(200)
+				_, _ = fmt.Fprint(w, `{"data":[]}`)
+			} else {
+				w.WriteHeader(503)
+			}
+		case r.Method == "POST" && r.URL.Path == "/v1/embeddings":
+			w.WriteHeader(embedStatus)
+			if embedStatus == 200 {
+				_, _ = fmt.Fprint(w, `{"data":[{"embedding":[0.1,0.2,0.3]}]}`)
+			} else {
+				_, _ = fmt.Fprintf(w, `{"error":"status %d"}`, embedStatus)
+			}
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+}
+
+func TestFailover_PrimaryDown_FallsBackWithLogging(t *testing.T) {
+	// Simulate real scenario: remote LM Studio is down, local Ollama is up.
+	lmDown := newTestLMStudioServer(t, false, 200)
+	defer lmDown.Close()
+	ollamaUp := newTestOllamaServer(t, true, 200)
+	defer ollamaUp.Close()
+
+	cfg := testConfigService(t,
+		config.ServerConfig{Backend: "lmstudio", Host: lmDown.URL, Model: "test-lm", Dims: 3},
+		config.ServerConfig{Backend: "ollama", Host: ollamaUp.URL, Model: "test-ollama", Dims: 3},
+	)
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	fe := NewFailoverEmbedder(cfg)
+	fe.SetLogger(logger)
+
+	result, err := fe.Embed(context.Background(), []string{"hello"})
+	if err != nil {
+		t.Fatalf("Embed should succeed via fallback, got: %v", err)
+	}
+	if len(result) == 0 {
+		t.Fatal("expected non-empty embeddings")
+	}
+	if fe.ActiveServerIndex() != 1 {
+		t.Errorf("active = %d, want 1 (should have fallen back to ollama)", fe.ActiveServerIndex())
+	}
+
+	logs := buf.String()
+	if !strings.Contains(logs, "health probe non-200") {
+		t.Error("expected log entry for failed health probe on server 0")
+	}
+	if !strings.Contains(logs, "selected embedding server") {
+		t.Error("expected log entry for server selection")
+	}
+	if !strings.Contains(logs, "test-ollama") {
+		t.Error("expected selected server log to mention the ollama model name")
+	}
+}
+
+func TestFailover_PrimaryUp_SelectsPrimary(t *testing.T) {
+	// Both servers are healthy — should select primary (server 0).
+	lmUp := newTestLMStudioServer(t, true, 200)
+	defer lmUp.Close()
+	ollamaUp := newTestOllamaServer(t, true, 200)
+	defer ollamaUp.Close()
+
+	cfg := testConfigService(t,
+		config.ServerConfig{Backend: "lmstudio", Host: lmUp.URL, Model: "test-lm", Dims: 3},
+		config.ServerConfig{Backend: "ollama", Host: ollamaUp.URL, Model: "test-ollama", Dims: 3},
+	)
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	fe := NewFailoverEmbedder(cfg)
+	fe.SetLogger(logger)
+
+	_, err := fe.Embed(context.Background(), []string{"hello"})
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if fe.ActiveServerIndex() != 0 {
+		t.Errorf("active = %d, want 0 (primary should be selected)", fe.ActiveServerIndex())
+	}
+
+	logs := buf.String()
+	if !strings.Contains(logs, "selected embedding server") {
+		t.Error("expected log entry for server selection")
+	}
+	if !strings.Contains(logs, "test-lm") {
+		t.Error("expected selected server log to mention the lmstudio model name")
+	}
+	if strings.Contains(logs, "health probe failed") || strings.Contains(logs, "health probe non-200") {
+		t.Error("no health probe warnings expected when primary is up")
+	}
+}
+
+func TestFailover_AllDown_LogsWarning(t *testing.T) {
+	lmDown := newTestLMStudioServer(t, false, 200)
+	defer lmDown.Close()
+	ollamaDown := newTestOllamaServer(t, false, 200)
+	defer ollamaDown.Close()
+
+	cfg := testConfigService(t,
+		config.ServerConfig{Backend: "lmstudio", Host: lmDown.URL, Model: "test-lm", Dims: 3},
+		config.ServerConfig{Backend: "ollama", Host: ollamaDown.URL, Model: "test-ollama", Dims: 3},
+	)
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	fe := NewFailoverEmbedder(cfg)
+	fe.SetLogger(logger)
+
+	_, err := fe.Embed(context.Background(), []string{"hello"})
+	if err == nil {
+		t.Fatal("expected error when all servers are down")
+	}
+
+	logs := buf.String()
+	if !strings.Contains(logs, "no healthy embedding server found") {
+		t.Error("expected 'no healthy embedding server found' warning")
+	}
+	// Should have two health probe warnings (one per server)
+	if count := strings.Count(logs, "health probe non-200"); count != 2 {
+		t.Errorf("expected 2 health probe warnings, got %d", count)
+	}
+}
+
+func TestFailover_PrimaryFailsDuringEmbed_LogsFailover(t *testing.T) {
+	// Primary is healthy but returns 500 on embed; should failover with logging.
+	srv1 := newTestOllamaServer(t, true, 500)
+	defer srv1.Close()
+	srv2 := newTestOllamaServer(t, true, 200)
+	defer srv2.Close()
+
+	cfg := testConfigService(t,
+		config.ServerConfig{Backend: "ollama", Host: srv1.URL, Model: "test-a", Dims: 3},
+		config.ServerConfig{Backend: "ollama", Host: srv2.URL, Model: "test-b", Dims: 3},
+	)
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	fe := NewFailoverEmbedder(cfg)
+	fe.SetLogger(logger)
+
+	_, err := fe.Embed(context.Background(), []string{"hello"})
+	if err != nil {
+		t.Fatalf("Embed should succeed via failover, got: %v", err)
+	}
+	if fe.ActiveServerIndex() != 1 {
+		t.Errorf("active = %d, want 1", fe.ActiveServerIndex())
+	}
+
+	logs := buf.String()
+	if !strings.Contains(logs, "embedding server failed, trying next") {
+		t.Error("expected failover log entry")
+	}
+}
+
+func TestFailover_Unreachable_LogsConnectionError(t *testing.T) {
+	// Server 0 is unreachable (closed immediately), server 1 is healthy.
+	unreachable := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+	}))
+	unreachable.Close() // close immediately to make it unreachable
+
+	up := newTestOllamaServer(t, true, 200)
+	defer up.Close()
+
+	cfg := testConfigService(t,
+		config.ServerConfig{Backend: "ollama", Host: unreachable.URL, Model: "dead", Dims: 3},
+		config.ServerConfig{Backend: "ollama", Host: up.URL, Model: "alive", Dims: 3},
+	)
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	fe := NewFailoverEmbedder(cfg)
+	fe.SetLogger(logger)
+
+	_, err := fe.Embed(context.Background(), []string{"hello"})
+	if err != nil {
+		t.Fatalf("Embed should succeed via fallback, got: %v", err)
+	}
+	if fe.ActiveServerIndex() != 1 {
+		t.Errorf("active = %d, want 1", fe.ActiveServerIndex())
+	}
+
+	logs := buf.String()
+	if !strings.Contains(logs, "health probe failed") {
+		t.Error("expected 'health probe failed' with connection error for unreachable server")
+	}
+	if !strings.Contains(logs, "selected embedding server") {
+		t.Error("expected server selection log")
 	}
 }
