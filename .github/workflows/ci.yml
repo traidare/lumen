@@ -45,9 +45,6 @@ jobs:
           file: coverage.out
           format: golang
 
-      - name: Script tests
-        run: bash scripts/test_run.sh
-
       - name: Vet
         run: go vet -tags=fts5 ./...
 
@@ -140,3 +137,24 @@ jobs:
           echo "Binary reported version: $VER"
           echo "$VER" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]' \
             || { echo "ERROR: version output does not match semver pattern"; exit 1; }
+
+  scripts:
+    name: Script tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    if: github.actor != 'release-please[bot]'
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unix script tests
+        if: runner.os != 'Windows'
+        run: |
+          bash scripts/test_run.sh
+          bash scripts/test_run_cmd.sh
+
+      - name: Windows script tests
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: call scripts\test_run_cmd_windows.bat

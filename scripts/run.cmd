@@ -1,8 +1,6 @@
-#!/usr/bin/env -S 2>/dev/null=2>NUL sh
-@goto batch 2>NUL;rm -f NUL
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-exec "${SCRIPT_DIR}/run.sh" "$@"
+#!/bin/sh
+# 2>NUL & @goto batch
+exec "$(dirname "$0")/run.sh" "$@"
 
 :batch
 @echo off
