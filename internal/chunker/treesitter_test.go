@@ -820,6 +820,7 @@ func TestDefaultLanguages_AllExtensionsPresent(t *testing.T) {
 		".cs":   []byte("class Foo {}"),
 		".dart":   []byte("void foo() {}"),
 		".svelte": []byte("<script lang=\"ts\">\nfunction hello(): string { return 'hi'; }\n</script>\n<p>hi</p>\n"),
+		".nix":  []byte("{ foo = 42; }"),
 		".md":   []byte("# Introduction\nSome content here.\n"),
 		".mdx":  []byte("# Introduction\nSome content here.\n"),
 		".yaml": []byte("foo: bar\n"),
@@ -1767,6 +1768,31 @@ func TestTreeSitterChunker_LeadingComments(t *testing.T) {
 			wantStartLine: 2,
 			wantInContent: "// adds numbers",
 		},
+
+		// ── Nix (comment: "comment") ──────────────────────────────────────────
+		// Note: the comment before the very first binding in a binding_set is
+		// attached to the enclosing attrset_expression by tree-sitter-nix, so it
+		// is not reachable via PrevNamedSibling(). Comments before subsequent
+		// bindings are inside the binding_set and are captured correctly.
+		{
+			name:     "nix: adjacent # comment captured (non-first binding)",
+			chunker:  langs[".nix"],
+			filePath: "f.nix",
+			src:      "{\n  placeholder = null;\n  # sets the version\n  version = \"1.0\";\n}\n",
+			symbol:   "version",
+			// placeholder L2, comment L3, version L4
+			wantStartLine: 3,
+			wantInContent: "# sets the version",
+		},
+		{
+			name:          "nix: blank line prevents capture",
+			chunker:       langs[".nix"],
+			filePath:      "f.nix",
+			src:           "{\n  placeholder = null;\n  # unrelated\n\n  other = 42;\n}\n",
+			symbol:        "other",
+			wantStartLine: 5,
+			wantMissing:   "# unrelated",
+		},
 	}
 
 	for _, tc := range cases {
@@ -1896,6 +1922,64 @@ func TestTreeSitterChunker_Dart_Comprehensive(t *testing.T) {
 	check("IntCallback", "type")       // type_alias
 	check("Repository", "type")        // abstract class
 	check("Animal.Animal", "function") // constructor
+}
+
+var sampleNix = []byte(`{
+  # plain string attribute
+  version = "2.0.0";
+
+  # single-arg lambda
+  mkGreeter = name: "Hello, ${name}!";
+
+  # formals lambda
+  buildPackage = { stdenv, lib, fetchFromGitHub, ... }:
+    stdenv.mkDerivation {
+      pname = "mypackage";
+      version = "1.0.0";
+    };
+
+  # plain value (non-function)
+  description = "My package";
+
+  # dotted attribute path
+  meta.homepage = "https://example.com";
+}
+`)
+
+func TestTreeSitterChunker_Nix(t *testing.T) {
+	langs := chunker.DefaultLanguages(512)
+	c, ok := langs[".nix"]
+	if !ok {
+		t.Fatal("DefaultLanguages() missing .nix")
+	}
+
+	chunks, err := c.Chunk("sample.nix", sampleNix)
+	if err != nil {
+		t.Fatalf("Chunk: %v", err)
+	}
+
+	bySymbol := make(map[string]chunker.Chunk)
+	for _, ch := range chunks {
+		bySymbol[ch.Symbol] = ch
+	}
+
+	check := func(symbol, kind string) {
+		t.Helper()
+		ch, ok := bySymbol[symbol]
+		if !ok {
+			t.Errorf("missing chunk %q (got: %v)", symbol, symbolNames(chunks))
+			return
+		}
+		if ch.Kind != kind {
+			t.Errorf("chunk %q kind = %q, want %q", symbol, ch.Kind, kind)
+		}
+	}
+
+	check("version", "var")
+	check("mkGreeter", "function")
+	check("buildPackage", "function")
+	check("description", "var")
+	check("meta.homepage", "var")
 }
 
 // mustPyChunker creates a Python TreeSitterChunker for use in tests.

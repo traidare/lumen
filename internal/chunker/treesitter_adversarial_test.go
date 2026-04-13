@@ -923,6 +923,7 @@ func TestAdversarial_NoFalsePositivesFromComments(t *testing.T) {
 		{".c", "// void fake(void) {}\n/* void also_fake(void) {} */\nvoid real(void) {}\n"},
 		{".cpp", "// void fake() {}\n/* void also_fake() {} */\nvoid real() {}\n"},
 		{".cs", "// void Fake() {}\n/* void AlsoFake() {} */\nclass Real { void real() {} }\n"},
+		{".nix", "# fake = 42;\n/* also_fake = 42; */\n{ real = 42; }\n"},
 	}
 
 	for _, tt := range tests {
@@ -979,6 +980,7 @@ func TestAdversarial_ChunkInvariants(t *testing.T) {
 		".tsx":  adversarialTSX,
 		".php":  adversarialPHP,
 		".dart": adversarialDart,
+		".nix":  adversarialNix,
 	}
 
 	for ext, src := range testFiles {
@@ -1315,4 +1317,115 @@ func TestAdversarial_Dart(t *testing.T) {
 	cs.mustNotHave("CommentedClass", "type")
 	cs.mustNotHave("fakeFunction", "function")
 	cs.mustNotHave("FakeClass", "type")
+}
+
+// ---------- Nix Adversarial ----------
+
+var adversarialNix = []byte(`{
+  # plain value bindings
+  version = "2.0.0";
+  description = "A package";
+
+  # single-arg lambda
+  mkGreeter = name: "Hello, ${name}!";
+  identity = x: x;
+
+  # formals lambda
+  buildPackage = { stdenv, lib, ... }:
+    stdenv.mkDerivation {
+      pname = "mypkg";
+    };
+
+  # formals + @ pattern
+  mkShell = { pkgs, ... } @ args:
+    pkgs.mkShell { inherit (args) buildInputs; };
+
+  # dotted attribute paths
+  networking.firewall.enable = true;
+  meta.homepage = "https://example.com";
+
+  # let expression with local bindings
+  result = let
+    helper = x: x + 1;
+    base = 41;
+  in helper base;
+
+  # recursive attribute set
+  overlays = rec {
+    default = final: prev: { };
+    myPackage = final.callPackage ./package.nix { };
+  };
+
+  # nested attribute set
+  config = {
+    services.nginx.enable = true;
+  };
+
+  # complex RHS (not a function)
+  packages = with pkgs; [ git vim ];
+  optionalPkg = if true then "yes" else "no";
+  checkedValue = assert true; 42;
+
+  # inherit — must NOT produce chunks
+  inherit (pkgs) git vim;
+  inherit version;
+
+  # comments — must NOT produce false positives
+  # fake = "not real";
+  /* also_fake = "not real"; */
+}
+`)
+
+func TestAdversarial_Nix(t *testing.T) {
+	langs := chunker.DefaultLanguages(512)
+	chunks, err := langs[".nix"].Chunk("adv.nix", adversarialNix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := newChunkSet(t, chunks)
+	t.Logf("Extracted chunks:\n%s", cs.dump())
+
+	// Plain value bindings
+	cs.mustHave("version", "var")
+	cs.mustHave("description", "var")
+
+	// Single-arg lambdas
+	cs.mustHave("mkGreeter", "function")
+	cs.mustHave("identity", "function")
+
+	// Formals lambda
+	cs.mustHave("buildPackage", "function")
+
+	// Formals + @ pattern
+	cs.mustHave("mkShell", "function")
+
+	// Dotted attribute paths
+	cs.mustHave("networking.firewall.enable", "var")
+	cs.mustHave("meta.homepage", "var")
+
+	// Let expression — outer binding is var (RHS is let_expression, not function_expression)
+	cs.mustHave("result", "var")
+	// Inner let bindings are also matched
+	cs.mustHave("helper", "function")
+	cs.mustHave("base", "var")
+
+	// Rec attrset
+	cs.mustHave("overlays", "var")
+	cs.mustHave("default", "function")
+	cs.mustHave("myPackage", "var")
+
+	// Nested attrset
+	cs.mustHave("config", "var")
+	cs.mustHave("services.nginx.enable", "var")
+
+	// Complex RHS
+	cs.mustHave("packages", "var")
+	cs.mustHave("optionalPkg", "var")
+	cs.mustHave("checkedValue", "var")
+
+	// Must NOT extract inherit or comments
+	cs.mustNotHave("fake", "var")
+	cs.mustNotHave("fake", "function")
+	cs.mustNotHave("also_fake", "var")
+	cs.mustNotHave("also_fake", "function")
 }
