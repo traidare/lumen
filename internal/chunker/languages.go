@@ -16,6 +16,7 @@ package chunker
 
 import (
 	sitter_dart "github.com/alexaandru/go-sitter-forest/dart"
+	sitter_nix "github.com/alexaandru/go-sitter-forest/nix"
 	sitter_swift "github.com/alexaandru/go-sitter-forest/swift"
 	sitter "github.com/smacker/go-tree-sitter"
 	sitter_c "github.com/smacker/go-tree-sitter/c"
@@ -47,6 +48,7 @@ var supportedExtensions = []string{
 	".swift",
 	".dart",
 	".svelte",
+	".nix",
 	".md", ".mdx",
 	".yaml", ".yml", ".json",
 }
@@ -322,6 +324,16 @@ func DefaultLanguages(maxChunkTokens int) map[string]Chunker {
 		},
 	})
 
+	nix := mustTreeSitterChunker(LanguageDef{
+		Language: sitter.NewLanguage(sitter_nix.GetLanguage()),
+		Queries: []QueryDef{
+			// General binding: name = value; — FIRST so function-valued bindings override.
+			{Pattern: `(binding attrpath: (attrpath) @name) @decl`, Kind: "var"},
+			// Function-valued binding: name = arg: body; or name = { formals }: body;
+			{Pattern: `(binding attrpath: (attrpath) @name expression: (function_expression)) @decl`, Kind: "function"},
+		},
+	})
+
 	goChunker := NewGoAST()
 
 	md := NewMarkdownChunker()
@@ -350,6 +362,7 @@ func DefaultLanguages(maxChunkTokens int) map[string]Chunker {
 		".swift":  swift,
 		".dart":   dart,
 		".svelte": svelte,
+		".nix":    nix,
 		".md":     md,
 		".mdx":    md,
 		".yaml":   structured,
