@@ -143,10 +143,16 @@ jobs:
     runs-on: ${{ matrix.os }}
     if: github.actor != 'release-please[bot]'
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
 
       - name: Unix script tests
         if: runner.os != 'Windows'
@@ -154,7 +160,12 @@ jobs:
           bash scripts/test_run.sh
           bash scripts/test_run_cmd.sh
 
-      - name: Windows script tests
+      - name: Windows script tests (run.cmd delegation)
         if: runner.os == 'Windows'
         shell: cmd
         run: call scripts\test_run_cmd_windows.bat
+
+      - name: Windows launcher MCP handshake (run.bat stdio)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pwsh -File scripts/test_run_windows.ps1
