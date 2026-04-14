@@ -157,42 +157,51 @@ assert_eq "pre-release version preserved" \
   "$(printf '{\n  ".": "0.0.1-alpha.4"\n}\n' | grep '"[.]"' | sed 's/.*"[^"]*"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/v\1/')"
 
 echo ""
-echo "=== stdio early-exit guard tests ==="
+echo "=== stdio download-on-first-run integration test ==="
 
-# Mirrors the guard condition in run.sh: first arg == "stdio" → early exit
-stdio_guard_fires() {
-  [ "${1:-}" = "stdio" ]
-}
+# Verifies that run.sh stdio downloads the binary and execs it when no binary
+# is present (first install). curl is stubbed in PATH — no real network calls.
+(
+  _SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+  _TMPROOT="$(mktemp -d)"
+  _FAKE_CURL_DIR="$(mktemp -d)"
+  trap 'rm -rf "$_TMPROOT" "$_FAKE_CURL_DIR"' EXIT
 
-if stdio_guard_fires "stdio"; then
-  ok "stdio guard fires for 'stdio' arg"
-else
-  fail "stdio guard fires for 'stdio' arg" "true" "false"
-fi
+  OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  ARCH_RAW="$(uname -m)"
+  case "$ARCH_RAW" in x86_64) ARCH="amd64" ;; aarch64) ARCH="arm64" ;; *) ARCH="$ARCH_RAW" ;; esac
+  _EXPECTED_BINARY="${_TMPROOT}/bin/lumen-${OS}-${ARCH}"
 
-if ! stdio_guard_fires "index"; then
-  ok "stdio guard does not fire for 'index' arg"
-else
-  fail "stdio guard does not fire for 'index' arg" "false" "true"
-fi
+  printf '{\n  ".": "0.0.1"\n}\n' > "${_TMPROOT}/.release-please-manifest.json"
+  mkdir -p "${_TMPROOT}/bin"
 
-if ! stdio_guard_fires "hook"; then
-  ok "stdio guard does not fire for 'hook' arg"
-else
-  fail "stdio guard does not fire for 'hook' arg" "false" "true"
-fi
+  # Stub curl: write a minimal executable to the -o destination and succeed
+  cat > "${_FAKE_CURL_DIR}/curl" <<'FAKECURL'
+#!/usr/bin/env bash
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) mkdir -p "$(dirname "$2")"; printf '#!/usr/bin/env bash\nexit 0\n' > "$2"; chmod +x "$2"; shift 2 ;;
+    *)  shift ;;
+  esac
+done
+exit 0
+FAKECURL
+  chmod +x "${_FAKE_CURL_DIR}/curl"
 
-if ! stdio_guard_fires ""; then
-  ok "stdio guard does not fire for empty arg"
-else
-  fail "stdio guard does not fire for empty arg" "false" "true"
-fi
+  EXIT_CODE=0
+  CLAUDE_PLUGIN_ROOT="${_TMPROOT}" PATH="${_FAKE_CURL_DIR}:${PATH}" \
+    bash "${_SCRIPT_DIR}/run.sh" stdio >/dev/null 2>&1 || EXIT_CODE=$?
 
-if ! stdio_guard_fires; then
-  ok "stdio guard does not fire for no args"
-else
-  fail "stdio guard does not fire for no args" "false" "true"
-fi
+  if [ "$EXIT_CODE" -ne 0 ]; then
+    echo "  FAIL: run.sh stdio with missing binary should download and exec (exit $EXIT_CODE)"
+    exit 1
+  fi
+  if [ ! -x "$_EXPECTED_BINARY" ]; then
+    echo "  FAIL: run.sh stdio should have downloaded binary to ${_EXPECTED_BINARY}"
+    exit 1
+  fi
+  echo "  PASS: run.sh stdio downloads binary and execs it on first install"
+) && PASS=$((PASS + 1)) || FAIL=$((FAIL + 1))
 
 echo ""
 echo "=== GitHub API tag parsing tests ==="
