@@ -52,7 +52,7 @@ if not exist "%BINARY%" (
   echo Downloading lumen !VERSION! for windows/!ARCH!... >&2
   if not exist "%PLUGIN_ROOT%\bin" mkdir "%PLUGIN_ROOT%\bin"
 
-  curl -sfL --max-time 300 --retry 3 --retry-delay 2 "!URL!" -o "%BINARY%"
+  call curl -sfL --max-time 300 --retry 3 --retry-delay 2 "!URL!" -o "%BINARY%"
   if errorlevel 1 (
     :: Fallback: manifest version not released yet — resolve latest from GitHub API
     echo Version !VERSION! not found, resolving latest release... >&2
@@ -61,7 +61,7 @@ if not exist "%BINARY%" (
     if defined GITHUB_TOKEN set "AUTH_HEADER=-H "Authorization: token %GITHUB_TOKEN%""
 
     set "TMPJSON=%TEMP%\lumen-latest.json"
-    curl -sfL !AUTH_HEADER! --max-time 30 --retry 2 --retry-delay 2 ^
+    call curl -sfL !AUTH_HEADER! --max-time 30 --retry 2 --retry-delay 2 ^
       "https://api.github.com/repos/!REPO!/releases/latest" -o "!TMPJSON!"
 
     set "LATEST_TAG="
@@ -88,7 +88,7 @@ if not exist "%BINARY%" (
     set "ASSET=lumen-!VERSION:~1!-windows-!ARCH!.exe"
     set "URL=https://github.com/!REPO!/releases/download/!VERSION!/!ASSET!"
 
-    curl -sfL --max-time 300 --retry 3 --retry-delay 2 "!URL!" -o "%BINARY%"
+    call curl -sfL --max-time 300 --retry 3 --retry-delay 2 "!URL!" -o "%BINARY%"
     if errorlevel 1 (
       echo Error: fallback download also failed >&2
       exit /b 1
