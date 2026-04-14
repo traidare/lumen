@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -171,12 +172,13 @@ func TestFailover_DimensionsReflectActive(t *testing.T) {
 		config.ServerConfig{Backend: "ollama", Host: up.URL, Model: "b", Dims: 1024},
 	)
 	fe := NewFailoverEmbedder(cfg)
-	if got := fe.Dimensions(); got != 768 {
-		t.Errorf("before embed: Dimensions() = %d, want 768", got)
+	// Dimensions() eagerly inits and picks the healthy server (b, 1024 dims).
+	if got := fe.Dimensions(); got != 1024 {
+		t.Errorf("before embed: Dimensions() = %d, want 1024 (healthy server)", got)
 	}
 	_, _ = fe.Embed(context.Background(), []string{"hello"})
 	if got := fe.Dimensions(); got != 1024 {
-		t.Errorf("after failover: Dimensions() = %d, want 1024", got)
+		t.Errorf("after embed: Dimensions() = %d, want 1024", got)
 	}
 	if got := fe.ModelName(); got != "b" {
 		t.Errorf("ModelName() = %q, want %q", got, "b")
@@ -470,5 +472,180 @@ func TestFailover_Unreachable_LogsConnectionError(t *testing.T) {
 	}
 	if !strings.Contains(logs, "selected embedding server") {
 		t.Error("expected server selection log")
+	}
+}
+
+// newTogglableOllamaServer creates an Ollama test server whose health and embed
+// responses can be toggled at runtime via atomic booleans.
+func newTogglableOllamaServer(t *testing.T, healthy *atomic.Bool, embedOK *atomic.Bool) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/":
+			if healthy.Load() {
+				_, _ = fmt.Fprint(w, "Ollama is running")
+			} else {
+				w.WriteHeader(503)
+			}
+		case r.Method == "POST" && r.URL.Path == "/api/embed":
+			if embedOK.Load() {
+				w.WriteHeader(200)
+				_, _ = fmt.Fprint(w, `{"embeddings":[[0.1,0.2,0.3]]}`)
+			} else {
+				w.WriteHeader(500)
+				_, _ = fmt.Fprint(w, `{"error":"server error"}`)
+			}
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+}
+
+func TestFailover_ReprobesAfterCooldown(t *testing.T) {
+	// Both servers start unhealthy (health probe returns 503).
+	healthy1 := &atomic.Bool{}
+	healthy2 := &atomic.Bool{}
+	embed1 := &atomic.Bool{}
+	embed2 := &atomic.Bool{}
+	embed1.Store(true)
+	embed2.Store(true)
+
+	srv1 := newTogglableOllamaServer(t, healthy1, embed1)
+	defer srv1.Close()
+	srv2 := newTogglableOllamaServer(t, healthy2, embed2)
+	defer srv2.Close()
+
+	cfg := testConfigService(t,
+		config.ServerConfig{Backend: "ollama", Host: srv1.URL, Model: "test-a", Dims: 3},
+		config.ServerConfig{Backend: "ollama", Host: srv2.URL, Model: "test-b", Dims: 3},
+	)
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	fe := NewFailoverEmbedder(cfg)
+	fe.SetLogger(logger)
+
+	// Step 1: All servers down — expect error.
+	_, err := fe.Embed(context.Background(), []string{"hello"})
+	if err == nil || !strings.Contains(err.Error(), "unhealthy") {
+		t.Fatalf("expected 'unhealthy' error, got: %v", err)
+	}
+
+	// Step 2: Make server 0 healthy.
+	healthy1.Store(true)
+
+	// Step 3: Embed immediately — should still fail (cooldown hasn't elapsed).
+	_, err = fe.Embed(context.Background(), []string{"hello"})
+	if err == nil {
+		t.Fatal("expected error before cooldown elapsed, but Embed succeeded")
+	}
+
+	// Step 4: Expire the cooldown by backdating lastProbeTime.
+	fe.mu.Lock()
+	fe.lastProbeTime = time.Now().Add(-reprobeInterval - time.Second)
+	fe.mu.Unlock()
+
+	// Step 5: Now Embed should re-probe and succeed.
+	_, err = fe.Embed(context.Background(), []string{"hello"})
+	if err != nil {
+		t.Fatalf("expected success after cooldown, got: %v", err)
+	}
+
+	// Verify re-probe was logged.
+	logs := buf.String()
+	if !strings.Contains(logs, "re-probing embedding servers after cooldown") {
+		t.Error("expected 're-probing' log entry")
+	}
+}
+
+func TestFailover_ReprobesAfterFailoverExhaustion(t *testing.T) {
+	// Both servers pass health check but return 500 on embed.
+	healthy1 := &atomic.Bool{}
+	healthy2 := &atomic.Bool{}
+	embed1 := &atomic.Bool{}
+	embed2 := &atomic.Bool{}
+	healthy1.Store(true)
+	healthy2.Store(true)
+	// embed bools default to false → 500
+
+	srv1 := newTogglableOllamaServer(t, healthy1, embed1)
+	defer srv1.Close()
+	srv2 := newTogglableOllamaServer(t, healthy2, embed2)
+	defer srv2.Close()
+
+	cfg := testConfigService(t,
+		config.ServerConfig{Backend: "ollama", Host: srv1.URL, Model: "test-a", Dims: 3},
+		config.ServerConfig{Backend: "ollama", Host: srv2.URL, Model: "test-b", Dims: 3},
+	)
+
+	fe := NewFailoverEmbedder(cfg)
+
+	// Step 1: Embed fails — both servers return 500, failover exhausted.
+	_, err := fe.Embed(context.Background(), []string{"hello"})
+	if err == nil || !strings.Contains(err.Error(), "exhausted") {
+		t.Fatalf("expected 'exhausted' error, got: %v", err)
+	}
+
+	// Step 2: ActiveServerIndex should be -1 after exhaustion.
+	if idx := fe.ActiveServerIndex(); idx != -1 {
+		t.Fatalf("expected ActiveServerIndex() == -1 after exhaustion, got %d", idx)
+	}
+
+	// Step 3: Fix server 0 to return 200 on embed.
+	embed1.Store(true)
+
+	// Step 4: Expire cooldown.
+	fe.mu.Lock()
+	fe.lastProbeTime = time.Now().Add(-reprobeInterval - time.Second)
+	fe.mu.Unlock()
+
+	// Step 5: Embed should re-probe and succeed.
+	_, err = fe.Embed(context.Background(), []string{"hello"})
+	if err != nil {
+		t.Fatalf("expected success after cooldown + fix, got: %v", err)
+	}
+}
+
+func TestFailover_ModelNameTriggersInit(t *testing.T) {
+	// Server 0 (LM Studio-like, 3584 dims) is DOWN.
+	// Server 1 (Ollama-like, 768 dims) is UP.
+	// ModelName() should eagerly init and return server 1's model, not server 0's.
+	down := newTestOllamaServer(t, false, 200)
+	defer down.Close()
+	up := newTestOllamaServer(t, true, 200)
+	defer up.Close()
+
+	cfg := testConfigService(t,
+		config.ServerConfig{Backend: "ollama", Host: down.URL, Model: "big-model", Dims: 3584},
+		config.ServerConfig{Backend: "ollama", Host: up.URL, Model: "small-model", Dims: 768},
+	)
+
+	fe := NewFailoverEmbedder(cfg)
+
+	// Before any Embed() call, ModelName() should return the healthy server's model.
+	if got := fe.ModelName(); got != "small-model" {
+		t.Errorf("ModelName() = %q, want %q (should eagerly init and pick healthy server)", got, "small-model")
+	}
+}
+
+func TestFailover_DimensionsTriggersInit(t *testing.T) {
+	// Server 0 (3584 dims) is DOWN, server 1 (768 dims) is UP.
+	// Dimensions() should eagerly init and return 768, not 3584.
+	down := newTestOllamaServer(t, false, 200)
+	defer down.Close()
+	up := newTestOllamaServer(t, true, 200)
+	defer up.Close()
+
+	cfg := testConfigService(t,
+		config.ServerConfig{Backend: "ollama", Host: down.URL, Model: "big-model", Dims: 3584},
+		config.ServerConfig{Backend: "ollama", Host: up.URL, Model: "small-model", Dims: 768},
+	)
+
+	fe := NewFailoverEmbedder(cfg)
+
+	// Before any Embed() call, Dimensions() should return the healthy server's dims.
+	if got := fe.Dimensions(); got != 768 {
+		t.Errorf("Dimensions() = %d, want 768 (should eagerly init and pick healthy server)", got)
 	}
 }

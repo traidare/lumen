@@ -27,6 +27,7 @@ import (
 )
 
 const healthCheckTimeout = 5 * time.Second
+const reprobeInterval = 30 * time.Second
 
 // FailoverEmbedder wraps multiple backend embedders with ordered health-check
 // failover. It probes servers on first use and fails over on transient errors.
@@ -40,6 +41,7 @@ type FailoverEmbedder struct {
 	cachedConfigs []config.ServerConfig // snapshot at last init
 	active        int
 	checked       bool
+	lastProbeTime time.Time
 }
 
 type serverEntry struct {
@@ -66,11 +68,27 @@ func (f *FailoverEmbedder) ActiveServerIndex() int {
 	return f.active
 }
 
-// Dimensions returns dims for the active server (or server 0 before first
-// Embed call).
+// maybeReprobe checks whether servers need (re-)initialization and does so
+// if required. Must be called with f.mu held. Returns the current active index.
+func (f *FailoverEmbedder) maybeReprobe(log bool) int {
+	needsInit := !f.checked || f.serversChanged()
+	needsReprobe := f.active < 0 && time.Since(f.lastProbeTime) >= reprobeInterval
+	if needsInit || needsReprobe {
+		if needsReprobe && log && f.logger != nil {
+			f.logger.Info("re-probing embedding servers after cooldown")
+		}
+		f.initServers()
+		f.checked = true
+	}
+	return f.active
+}
+
+// Dimensions returns dims for the active server. On first call it probes
+// servers for health to ensure the returned dimensions match the server
+// that will actually handle embeddings.
 func (f *FailoverEmbedder) Dimensions() int {
 	f.mu.Lock()
-	idx := f.active
+	idx := f.maybeReprobe(false)
 	f.mu.Unlock()
 	if idx < 0 {
 		idx = 0
@@ -78,10 +96,12 @@ func (f *FailoverEmbedder) Dimensions() int {
 	return f.cfg.ServerDims(idx)
 }
 
-// ModelName returns the model name for the active server.
+// ModelName returns the model name for the active server. On first call it
+// probes servers for health to ensure the returned name matches the server
+// that will actually handle embeddings.
 func (f *FailoverEmbedder) ModelName() string {
 	f.mu.Lock()
-	idx := f.active
+	idx := f.maybeReprobe(false)
 	f.mu.Unlock()
 	if idx < 0 {
 		idx = 0
@@ -98,10 +118,7 @@ func (f *FailoverEmbedder) ModelName() string {
 // errors (5xx, network) it fails over to the next healthy server.
 func (f *FailoverEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
 	f.mu.Lock()
-	if !f.checked || f.serversChanged() {
-		f.initServers()
-		f.checked = true
-	}
+	f.maybeReprobe(true)
 	f.mu.Unlock()
 
 	if f.active < 0 {
@@ -132,6 +149,7 @@ func (f *FailoverEmbedder) Embed(ctx context.Context, texts []string) ([][]float
 		f.servers[active].healthy = false
 		next := f.findNextHealthy(active)
 		if next < 0 {
+			f.active = -1
 			f.mu.Unlock()
 			return nil, fmt.Errorf("all embedding servers exhausted after failover: last error: %w", err)
 		}
@@ -171,6 +189,7 @@ func (f *FailoverEmbedder) serversChanged() bool {
 // initServers initializes the server list and probes for the first healthy
 // server. Must be called with f.mu held.
 func (f *FailoverEmbedder) initServers() {
+	f.lastProbeTime = time.Now()
 	servers := f.cfg.Servers()
 	f.servers = make([]serverEntry, len(servers))
 	f.cachedConfigs = make([]config.ServerConfig, len(servers))
