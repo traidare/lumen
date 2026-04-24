@@ -26,3 +26,7 @@ bench-swe/overview.txt
 **/.claude/worktrees
 **/.claire
 .worktrees
+
+# Nix
+/result*
+/source
