@@ -14,9 +14,10 @@ case "$ARCH" in
   aarch64) ARCH="arm64" ;;
 esac
 
-# Find binary: check bin/ first, then goreleaser dist/ output, then download
+# Find binary: check PATH first, then bin/, then download
 BINARY=""
 for candidate in \
+  "$(command -v lumen 2>/dev/null || true)" \
   "${PLUGIN_ROOT}/bin/lumen" \
   "${PLUGIN_ROOT}/bin/lumen-${OS}-${ARCH}"; do
   if [ -x "$candidate" ]; then
